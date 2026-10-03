@@ -6,9 +6,11 @@
 //! the game's local mail database. `update` installs new releases. `app` ties these together.
 
 pub mod app;
+pub mod auth;
 pub mod capture;
 pub mod game;
 pub mod mail;
+pub mod net;
 pub mod protocol;
 pub mod ui;
 pub mod update;

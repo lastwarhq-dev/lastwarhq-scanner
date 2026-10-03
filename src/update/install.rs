@@ -1,12 +1,13 @@
 //! Installing a release: download its exe, check it, and put it in place of the running one.
 
-use std::ffi::c_void;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::update::{REPO, Version, http};
+use crate::net::http;
+use crate::update::{REPO, Version};
+use crate::util::crypto::sha256;
 
 /// The release asset that is the tool, and its checksum file, `<name>.sha256`.
 const EXE_NAME: &str = "lastwarhq-scanner.exe";
@@ -16,22 +17,6 @@ const MAX_EXE: usize = 64 << 20;
 
 /// Starting the tool with this argument makes it wait for the version it replaced to close.
 pub const UPDATED_ARG: &str = "--updated";
-
-#[link(name = "bcrypt")]
-unsafe extern "system" {
-    fn BCryptHash(
-        algorithm: *mut c_void,
-        secret: *const u8,
-        secret_len: u32,
-        input: *const u8,
-        input_len: u32,
-        output: *mut u8,
-        output_len: u32,
-    ) -> i32;
-}
-
-/// `BCRYPT_SHA256_ALG_HANDLE`, a pseudo-handle that needs no opening.
-const BCRYPT_SHA256_ALG_HANDLE: usize = 0x41;
 
 /// Downloads release `version`'s exe from GitHub, checks it against the release's SHA-256,
 /// and puts it in place of the running exe. Returns the exe's path, to start the new version
@@ -63,29 +48,6 @@ fn parse_checksum(file: &[u8]) -> Result<[u8; 32], String> {
     for (byte, pair) in hash.iter_mut().zip(hex.chunks(2)) {
         let pair = std::str::from_utf8(pair).map_err(|_| bad())?;
         *byte = u8::from_str_radix(pair, 16).map_err(|_| bad())?;
-    }
-    Ok(hash)
-}
-
-/// SHA-256 through Windows' own cryptography library.
-fn sha256(data: &[u8]) -> Result<[u8; 32], String> {
-    let len = u32::try_from(data.len()).map_err(|_| "too large to hash")?;
-    let mut hash = [0u8; 32];
-    // SAFETY: the pseudo-handle needs no opening; input and output point at buffers of the
-    // lengths given; there is no secret.
-    let status = unsafe {
-        BCryptHash(
-            BCRYPT_SHA256_ALG_HANDLE as *mut c_void,
-            std::ptr::null(),
-            0,
-            data.as_ptr(),
-            len,
-            hash.as_mut_ptr(),
-            hash.len() as u32,
-        )
-    };
-    if status != 0 {
-        return Err(format!("SHA-256 failed (status {status:#x})"));
     }
     Ok(hash)
 }
@@ -140,19 +102,6 @@ pub fn clean_up(exe: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha256_matches_known_values() {
-        let hex = |h: [u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        assert_eq!(
-            hex(sha256(b"abc").unwrap()),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            hex(sha256(b"").unwrap()),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
 
     #[test]
     fn checksum_file_is_read() {

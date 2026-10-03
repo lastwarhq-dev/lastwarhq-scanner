@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::auth;
 use crate::capture::Packet;
 use crate::capture::adapters::{self, Adapter};
 use crate::capture::npcap::{self, Capture};
@@ -74,6 +75,7 @@ pub fn run() -> Result<(), String> {
         });
     }
     update::watch(Arc::clone(&state));
+    auth::start(&state);
     window::run(state)
 }
 

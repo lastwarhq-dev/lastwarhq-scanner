@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::app::state::{Install, State, UpdateStatus};
+use crate::app::state::{AuthStatus, AuthStep, Install, State, UpdateStatus};
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
 use crate::game::week::{ds_signups_open, vs_day};
@@ -35,6 +35,9 @@ pub struct Screen {
     /// The game connection, under the headline, with a dot of the mark's colour.
     pub connection: String,
     pub connection_mark: Mark,
+    /// The LastWarHQ sign-in, shown above the data rows; clicking it signs in or out. It
+    /// doesn't count towards the headline, which is about the game data.
+    pub sign_in: Row,
     /// Alliance, roster, DS sign-ups and DS results.
     pub rows: [Row; 4],
     /// What to do about missing VS days, if any are missing.
@@ -174,10 +177,40 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         mark,
         connection,
         connection_mark,
+        sign_in: sign_in_row(&state.auth, view.alliance_id()),
         rows,
         vs_hint,
         vs_days,
         footer: footer(&state.update, Version::current()),
+    }
+}
+
+/// The LastWarHQ row: who is signed in, or what clicking it does. Once signed in, it also says
+/// if the alliance the game shows isn't one the user manages, as that one can't be synced.
+fn sign_in_row(auth: &AuthStatus, alliance: Option<&str>) -> Row {
+    let (mark, text) = match (&auth.user, &auth.step) {
+        (_, AuthStep::SigningIn) => (Mark::Pending, "Finish signing in in the browser".into()),
+        (Some(user), AuthStep::SigningOut) => (Mark::Pending, format!("{user} · signing out")),
+        (None, AuthStep::Failed(why)) => (Mark::Failed, format!("{why} · click to sign in")),
+        (None, _) => (Mark::Action, "Click to sign in".into()),
+        (Some(user), AuthStep::Checking) => (Mark::Pending, format!("{user} · checking")),
+        (Some(user), AuthStep::Failed(why)) => (Mark::Failed, format!("{user} · {why}")),
+        (Some(user), AuthStep::Idle) => match (&auth.alliances, alliance) {
+            (Some(managed), Some(ours))
+                if !managed.iter().any(|id| id.eq_ignore_ascii_case(ours)) =>
+            {
+                (
+                    Mark::Action,
+                    format!("{user} · doesn't manage this alliance"),
+                )
+            }
+            _ => (Mark::Done, user.clone()),
+        },
+    };
+    Row {
+        label: "LastWarHQ",
+        mark,
+        text,
     }
 }
 
@@ -459,6 +492,78 @@ mod tests {
                 "Stale · mail: cannot open the mail database: Access is denied. (os error 5)"
             )
         );
+    }
+
+    #[test]
+    fn the_sign_in_row_follows_the_sign_in() {
+        let row = |auth: &AuthStatus, alliance| {
+            let r = sign_in_row(auth, alliance);
+            (r.mark, r.text)
+        };
+        let mut auth = AuthStatus::default();
+        assert_eq!(row(&auth, None), (Mark::Action, "Click to sign in".into()));
+        auth.step = AuthStep::SigningIn;
+        assert_eq!(
+            row(&auth, None),
+            (Mark::Pending, "Finish signing in in the browser".into())
+        );
+        auth.step = AuthStep::Failed("timed out waiting for the browser".into());
+        assert_eq!(
+            row(&auth, None),
+            (
+                Mark::Failed,
+                "timed out waiting for the browser · click to sign in".into()
+            )
+        );
+
+        let ours = "0123456789abcdef0123456789abcdef";
+        auth = AuthStatus {
+            user: Some("example".into()),
+            alliances: None,
+            step: AuthStep::Checking,
+            generation: 0,
+        };
+        assert_eq!(
+            row(&auth, Some(ours)),
+            (Mark::Pending, "example · checking".into())
+        );
+        auth.step = AuthStep::Idle;
+        auth.alliances = Some(vec![ours.to_uppercase()]);
+        assert_eq!(row(&auth, Some(ours)), (Mark::Done, "example".into()));
+        assert_eq!(row(&auth, None), (Mark::Done, "example".into()));
+        auth.alliances = Some(vec![]);
+        assert_eq!(
+            row(&auth, Some(ours)),
+            (
+                Mark::Action,
+                "example · doesn't manage this alliance".into()
+            )
+        );
+        auth.step = AuthStep::SigningOut;
+        assert_eq!(
+            row(&auth, Some(ours)),
+            (Mark::Pending, "example · signing out".into())
+        );
+        // A failed sign-out still shows the user: they are not signed out.
+        auth.step = AuthStep::Failed("sign-out failed: Credential Manager refused it".into());
+        assert_eq!(
+            row(&auth, Some(ours)),
+            (
+                Mark::Failed,
+                "example · sign-out failed: Credential Manager refused it".into()
+            )
+        );
+        auth.step = AuthStep::Failed("lastwarhq.dev: no connection".into());
+        assert_eq!(
+            row(&auth, Some(ours)),
+            (
+                Mark::Failed,
+                "example · lastwarhq.dev: no connection".into()
+            )
+        );
+        // Not shown as a reason for the headline: a signed-out PC still collects.
+        let now = Duration::from_secs(SATURDAY + 2 * 86_400);
+        assert_eq!(screen(&loaded(now), now).headline, "All in sync");
     }
 
     #[test]

@@ -13,6 +13,34 @@ pub struct State {
     pub capture: Capture,
     pub mail: MailStatus,
     pub update: UpdateStatus,
+    pub auth: AuthStatus,
+}
+
+/// Signing in to LastWarHQ. The token itself is kept only in Windows Credential Manager.
+#[derive(Debug, Default)]
+pub struct AuthStatus {
+    /// The LastWarHQ user the stored token belongs to.
+    pub user: Option<String>,
+    /// The alliances the user manages (and so can sync), as of the last `GET /v1/me`.
+    pub alliances: Option<Vec<String>>,
+    pub step: AuthStep,
+    /// Raised by every sign-in and sign-out. Work started in an earlier generation (a
+    /// `me` call still on its way, say) is dropped when it finishes, so it can't undo them.
+    pub generation: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum AuthStep {
+    #[default]
+    Idle,
+    /// Waiting for the user to approve in the browser.
+    SigningIn,
+    /// Asking the site who the token belongs to.
+    Checking,
+    /// The token couldn't be removed here; asking the site to disconnect this PC.
+    SigningOut,
+    /// Why the last sign-in or check failed.
+    Failed(String),
 }
 
 /// The mail reads, at start-up and every few minutes.

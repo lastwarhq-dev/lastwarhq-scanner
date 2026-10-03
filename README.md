@@ -58,12 +58,35 @@ Only one copy of the tool runs at a time.
 |---|---|
 | Headline | **All in sync** (green tick): the game is connected, every row has a green tick (or is closed), and every finished VS day is loaded. **Open the game panels** (amber): connected, but something is missing; the rows say what. **Waiting for the game** or **Starting capture** (grey): no game connection yet. **Not capturing** (red): capture failed. |
 | Line under it | The game connection. Green: connected, with a heartbeat (every 4 s) in the last 12 s. Grey: searching for the game, or no heartbeat. Red: why capture failed. |
+| LastWarHQ | Your LastWarHQ sign-in: your username once signed in; until then, **Click to sign in**. See [Signing in to LastWarHQ](#signing-in-to-lastwarhq). It doesn't count towards the headline. |
 | Alliance | The account's alliance, as `[ABBR] Name`. Click the row to copy the alliance ID. The member list names the alliance only by id; the name comes with the identified account's profile or the Desert Storm participants panel, and until then the row shows the id. Until either has arrived, **Open the member list**. |
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)). **Copy JSON** copies the [data payload](#data-payload). |
+
+### Signing in to LastWarHQ
+
+Click the **LastWarHQ** row to sign in. The tool opens LastWarHQ's connect page in your browser,
+where you approve this PC (sign in to the site first if it asks). The browser then comes back
+to the tool. Once the token has been swapped and saved, the tab says **Connected** and the row
+shows your username; if anything fails, the tab says why the sign-in didn't finish.
+
+- It's PKCE sign-in for desktop apps (RFC 8252, RFC 7636): the tool listens on `127.0.0.1`, on a
+  port Windows picks, only until the browser comes back or 10 minutes pass. The browser brings a
+  one-time code, which the tool swaps for a token over HTTPS with a secret only it holds, so the
+  code is no use to anything else that sees it.
+- The token is kept in **Windows Credential Manager**, as "LastWarHQ Scanner" under Windows
+  Credentials, encrypted for your Windows account. Nothing else of the sign-in is saved.
+- At start-up the tool checks the token with LastWarHQ. If the site no longer accepts it (the
+  PC was disconnected on the site, or it went 90 days unused), the token is deleted and the
+  row asks you to sign in again.
+- If you manage alliances on LastWarHQ but not the one the game shows, the row says so: that
+  alliance can't be synced.
+- Click the row again to sign out: the token is deleted, and LastWarHQ is told to disconnect
+  this PC. If Credential Manager won't delete the token, you count as signed out only once
+  LastWarHQ confirms the disconnect; otherwise the row says sign-out failed.
 
 ### Desert Storm sign-ups
 
@@ -196,13 +219,16 @@ cleared. Once the account's alliance is known, another alliance's member list is
 
 - **Receives only.** It captures a copy of the traffic on the game's ports. Only the server's
   messages are decoded; the game's own requests are encrypted and only counted. It sends
-  nothing to the game and listens on no ports. Its only connections of its own are to GitHub
-  (`api.github.com` and `github.com`, over HTTPS): one an hour to check for a new release, and,
-  when you press Update now, to download it.
+  nothing to the game. Its only connections of its own, all over HTTPS, are to GitHub
+  (`api.github.com` and `github.com`: one an hour to check for a new release, and, when you
+  press Update now, to download it) and to LastWarHQ (`lastwarhq.dev`: signing in, and
+  checking the sign-in at start-up). It listens only while you sign in, on `127.0.0.1`, for
+  the browser to come back.
 - **Hands off the game.** It never hooks, reads the memory of, or modifies the game. The only
   game file it reads is the mail database.
-- **Memory only.** Data lives in memory while the tool runs and is gone when it closes. The
-  only file the tool writes is its own exe, when you update it.
+- **Memory only.** Data lives in memory while the tool runs and is gone when it closes. It
+  keeps only its LastWarHQ sign-in token, in Windows Credential Manager, and the only file it
+  writes is its own exe, when you update it.
 - **No login data kept.** The game's login messages (`login.ext`, `login.other`, `init`) are
   decoded like every other message as they pass through, but nothing in them is used, kept,
   shown or copied.
@@ -233,8 +259,9 @@ The exe is `target\release\lastwarhq-scanner.exe`.
 
 The exe depends on two crates directly: `etherparse` (packet headers) and `ruzstd` (zstd
 decompression), which bring in `arrayvec` and `twox-hash`. The window (Win32, drawn with GDI+
-and GDI), the update download (WinHTTP, with SHA-256 from Windows' `bcrypt`), the SQLite
-reader, JSON and SmartFox decoding are written in the project, with bounds checks so damaged
+and GDI), HTTPS (WinHTTP), SHA-256 and random bytes (Windows' `bcrypt`), the sign-in token store
+(Windows Credential Manager), the sign-in listener, the SQLite reader, JSON and SmartFox
+decoding are written in the project, with bounds checks so damaged
 input gives an error rather than a crash. Damaged input also can't make them use much memory:
 
 - The SQLite reader uses each page and cell once, decodes no more payload than the file
@@ -254,9 +281,11 @@ cargo fmt --check
   week, and partly readable lists. They also cover account, alliance and week changes,
   including a mail load that crosses the weekly reset, and the connection and memory limits.
   For updates, they cover versions, release replies, checksum files and swapping the exe
-  (on files in a temporary folder).
+  (on files in a temporary folder). For signing in, they cover PKCE (against RFC 7636's
+  example), the connect address, API answers and errors, and the callback listener, which
+  they drive through a socket on `127.0.0.1`.
 - No test uses real game data: no captures, no game files. None of them need Npcap or the game
-  installed, and none connect to the network.
+  installed, none connect to the internet, and none touch Credential Manager.
 
 ### Releases
 
@@ -283,6 +312,8 @@ that can create releases. The workflow uses only GitHub's own actions (`checkout
 | `src/mail` | The read-only SQLite reader and Desert Storm result mails |
 | `src/ui` | The Win32 window, what it shows, and drawing it |
 | `src/update` | Checking GitHub for releases; downloading, checking and swapping in the new exe |
+| `src/auth` | Signing in to LastWarHQ: browser sign-in, the scanner API, the stored token |
+| `src/net` | HTTPS through WinHTTP |
 | `src/util` | JSON and UTC time helpers |
 | `.github/workflows` | The release build |
 

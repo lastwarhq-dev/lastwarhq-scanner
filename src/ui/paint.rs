@@ -146,7 +146,7 @@ const MARGIN: f32 = 16.0;
 const HEADER_Y: f32 = 22.0;
 const BADGE: f32 = 68.0;
 const CARD_Y: f32 = 114.0;
-const ROWS: f32 = 4.0;
+const ROWS: f32 = 5.0;
 const ROW_H: f32 = 54.0;
 const VS_Y: f32 = CARD_Y + ROWS * ROW_H + 24.0;
 const TILES_Y: f32 = VS_Y + 34.0;
@@ -563,7 +563,8 @@ impl Painter {
         // The rows, in a bordered card.
         let (cx, cw) = (MARGIN, WIDTH - 2.0 * MARGIN);
         self.rounded((cx, CARD_Y, cw, ROWS * ROW_H), 8.0, None, Some(BORDER));
-        for (i, row) in screen.rows.iter().enumerate() {
+        let rows = std::iter::once(&screen.sign_in).chain(&screen.rows);
+        for (i, row) in rows.enumerate() {
             let y = CARD_Y + i as f32 * ROW_H;
             if i > 0 {
                 self.fill_rect(cx + 1.0, y, cw - 2.0, 1.0, BORDER);
@@ -760,7 +761,10 @@ mod tests {
         assert_eq!(row_at(x, CARD_Y), Some(0));
         assert_eq!(row_at(x, CARD_Y + ROW_H - 1.0), Some(0));
         assert_eq!(row_at(x, CARD_Y + ROW_H), Some(1));
-        assert_eq!(row_at(x, CARD_Y + ROWS * ROW_H - 1.0), Some(3));
+        assert_eq!(
+            row_at(x, CARD_Y + ROWS * ROW_H - 1.0),
+            Some(ROWS as usize - 1)
+        );
         assert_eq!(row_at(x, CARD_Y + ROWS * ROW_H), None);
         assert_eq!(row_at(x, CARD_Y - 1.0), None);
         assert_eq!(row_at(MARGIN - 1.0, CARD_Y + 1.0), None);

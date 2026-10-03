@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::export::payload_json;
 use crate::app::state::{Install, State};
+use crate::auth;
 use crate::ui::paint::{self, ButtonState, HANDLE, Painter, RECT};
 use crate::ui::status::{Mark, Screen, screen};
 use crate::update::{Version, install};
@@ -199,8 +200,10 @@ const CW_USEDEFAULT: i32 = 0x8000_0000_u32 as i32;
 const IDC_ARROW: usize = 32512;
 const IDC_HAND: usize = 32649;
 
+/// The card row that signs in or out when clicked.
+const SIGN_IN_ROW: usize = 0;
 /// The card row that copies the alliance id when clicked.
-const ALLIANCE_ROW: usize = 0;
+const ALLIANCE_ROW: usize = 1;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 
@@ -528,14 +531,39 @@ fn note(text: String, mark: Mark) {
     refresh();
 }
 
-/// Whether the client-area point (device pixels) is on the Alliance row while there is an
-/// alliance id to copy.
-fn on_alliance_id(x: i32, y: i32) -> bool {
-    let Some(scale) = UI.with(|ui| ui.borrow().as_ref().map(|u| u.scale)) else {
-        return false;
+/// The clickable row at the client-area point (device pixels), if it can be clicked now: the
+/// LastWarHQ row unless a sign-in is waiting, and the Alliance row once there is an id.
+fn clickable_row(x: i32, y: i32) -> Option<usize> {
+    let scale = UI.with(|ui| ui.borrow().as_ref().map(|u| u.scale))?;
+    let row = paint::row_at(x as f32 / scale, y as f32 / scale)?;
+    let s = state();
+    let clickable = match row {
+        SIGN_IN_ROW => !auth::busy(&s.auth),
+        ALLIANCE_ROW => s.view.alliance_id().is_some(),
+        _ => false,
     };
-    paint::row_at(x as f32 / scale, y as f32 / scale) == Some(ALLIANCE_ROW)
-        && state().view.alliance_id().is_some()
+    clickable.then_some(row)
+}
+
+/// Signs in through the browser or, after asking, signs out.
+fn sign_in_clicked() {
+    let Some(window) = UI.with(|ui| ui.borrow().as_ref().map(|u| u.window)) else {
+        return;
+    };
+    let shared = Arc::clone(STATE.get().expect("state set"));
+    let user = state().auth.user.clone();
+    match user {
+        None => auth::sign_in(&shared),
+        Some(user) => {
+            let question = format!(
+                "Sign out {user} from LastWarHQ?\n\nThis PC is disconnected from your LastWarHQ account. You can sign in again at any time."
+            );
+            if message_box(window, &question, MB_OKCANCEL | MB_ICONQUESTION) == IDOK {
+                auth::sign_out(&shared);
+            }
+        }
+    }
+    refresh();
 }
 
 /// Copies the alliance id, the one id the sync is keyed on.
@@ -691,17 +719,19 @@ fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
         WM_LBUTTONUP => {
             // The low and high words of `lparam` are the signed client x and y.
             let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
-            if on_alliance_id(x, y) {
-                copy_alliance_id();
+            match clickable_row(x, y) {
+                Some(SIGN_IN_ROW) => sign_in_clicked(),
+                Some(ALLIANCE_ROW) => copy_alliance_id(),
+                _ => {}
             }
         }
-        // A hand over the Alliance row, which copies the id when clicked.
+        // A hand over the rows that do something when clicked.
         WM_SETCURSOR if hwnd == wparam as HWND && lparam as usize & 0xffff == HTCLIENT => {
             let mut point = POINT { x: 0, y: 0 };
             // SAFETY: `point` is a valid out-parameter; `hwnd` is this window.
             let over =
                 unsafe { GetCursorPos(&mut point) != 0 && ScreenToClient(hwnd, &mut point) != 0 }
-                    && on_alliance_id(point.x, point.y);
+                    && clickable_row(point.x, point.y).is_some();
             if over {
                 // SAFETY: a system cursor, loaded and set on this thread.
                 unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND as *const u16)) };

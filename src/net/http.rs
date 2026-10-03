@@ -1,5 +1,5 @@
-//! HTTPS GET through WinHTTP, the HTTP client built into Windows: TLS, the system proxy and
-//! redirects come from Windows, through hand-written declarations, no crates.
+//! HTTPS requests through WinHTTP, the HTTP client built into Windows: TLS, the system proxy
+//! and redirects come from Windows, through hand-written declarations, no crates.
 
 #![allow(clippy::upper_case_acronyms)]
 
@@ -106,15 +106,42 @@ fn failure(what: &str) -> String {
     format!("{what}: {reason}")
 }
 
+/// An answer: its HTTP status and body.
+pub struct Response {
+    pub status: u32,
+    pub body: Vec<u8>,
+}
+
 /// Fetches `https://{host}{path}` with an extra request header (or `""` for none), following
 /// redirects. Fails on any status but 200, or if the body is longer than `limit` bytes.
 pub fn get(host: &str, path: &str, header: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let headers: &[&str] = if header.is_empty() { &[] } else { &[header] };
+    let response = request("GET", host, path, headers, &[], limit)?;
+    if response.status != 200 {
+        return Err(format!("{host} answered HTTP {}", response.status));
+    }
+    Ok(response.body)
+}
+
+/// Sends `method` to `https://{host}{path}` with extra request headers (each `Name: value`)
+/// and `body` (empty for none), following redirects. Returns the answer whatever its status;
+/// fails if it can't be had, or if its body is longer than `limit` bytes.
+pub fn request(
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[&str],
+    body: &[u8],
+    limit: usize,
+) -> Result<Response, String> {
     let agent = wide(&format!("LastWarHQ-Scanner/{}", Version::current()));
-    let (host_w, path_w, verb, header_w) = (wide(host), wide(path), wide("GET"), wide(header));
+    let header = headers.join("\r\n");
+    let (host_w, path_w, verb, header_w) = (wide(host), wide(path), wide(method), wide(&header));
+    let body_len = u32::try_from(body.len()).map_err(|_| "request body too large")?;
     // SAFETY: every string is NUL-terminated UTF-16 that outlives the calls using it; every
     // handle is checked for null before use and closed by `Handle`, the request before the
     // connection before the session (locals drop in reverse order); out-parameters point at
-    // locals of the size given.
+    // locals of the size given; the body outlives the send, which reads exactly its length.
     unsafe {
         let session = WinHttpOpen(
             agent.as_ptr(),
@@ -151,7 +178,20 @@ pub fn get(host: &str, path: &str, header: &str, limit: usize) -> Result<Vec<u8>
         } else {
             (header_w.as_ptr(), u32::MAX)
         };
-        if WinHttpSendRequest(request.0, headers, headers_len, std::ptr::null(), 0, 0, 0) == 0
+        let body_ptr = if body.is_empty() {
+            std::ptr::null()
+        } else {
+            body.as_ptr().cast()
+        };
+        if WinHttpSendRequest(
+            request.0,
+            headers,
+            headers_len,
+            body_ptr,
+            body_len,
+            body_len,
+            0,
+        ) == 0
             || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0
         {
             return Err(failure(host));
@@ -169,10 +209,7 @@ pub fn get(host: &str, path: &str, header: &str, limit: usize) -> Result<Vec<u8>
         {
             return Err(failure(host));
         }
-        if status != 200 {
-            return Err(format!("{host} answered HTTP {status}"));
-        }
-        let mut body = Vec::new();
+        let mut received = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
             let mut read: u32 = 0;
@@ -186,12 +223,15 @@ pub fn get(host: &str, path: &str, header: &str, limit: usize) -> Result<Vec<u8>
                 return Err(failure(host));
             }
             if read == 0 {
-                return Ok(body);
+                return Ok(Response {
+                    status,
+                    body: received,
+                });
             }
-            if body.len() + read as usize > limit {
+            if received.len() + read as usize > limit {
                 return Err(format!("{host} sent more than {limit} bytes"));
             }
-            body.extend_from_slice(&chunk[..read as usize]);
+            received.extend_from_slice(&chunk[..read as usize]);
         }
     }
 }

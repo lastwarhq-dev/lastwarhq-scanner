@@ -1,7 +1,6 @@
 //! Updates from the project's GitHub releases: a check at start-up and every hour after, and,
 //! when the user agrees, [`install::install`] swaps in the new exe.
 
-mod http;
 pub mod install;
 
 use std::fmt;
@@ -10,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::app::state::State;
+use crate::net::http;
 use crate::util::json::{self, Json};
 use crate::util::time::now;
 
