@@ -1,0 +1,6 @@
+# A dated nightly, so every build uses the same compiler. Nightly is needed for the
+# dependency age filter in .cargo/config.toml; it becomes stable in Rust 1.100.
+[toolchain]
+channel = "nightly-2026-10-02"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

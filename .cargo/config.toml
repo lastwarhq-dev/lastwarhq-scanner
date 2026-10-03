@@ -1,0 +1,8 @@
+# Dependency versions must have been on crates.io for at least 7 days.
+# Applies to cargo add, cargo update and cargo generate-lockfile.
+[registry]
+global-min-publish-age = "7 days"
+
+# Link the C runtime into the exe, so it runs without the Visual C++ Redistributable installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,96 @@
+name: Release
+
+# Every push to main, including merged pull requests, is checked, built and published as a new
+# release. The build job only has read access; the publish job is the only one that can write,
+# so nothing that runs during the build (such as crate build scripts) can change releases.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Releases are published one at a time, in push order.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package the exe with its checksum
+        id: package
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages[0].version
+          "version=$version" >> $env:GITHUB_OUTPUT
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/lastwarhq-scanner.exe dist/
+          $hash = (Get-FileHash dist/lastwarhq-scanner.exe -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$PWD/dist/lastwarhq-scanner.exe.sha256", "$hash  lastwarhq-scanner.exe`n")
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lastwarhq-scanner-windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lastwarhq-scanner-windows-x64
+          path: dist
+
+      - name: Publish the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tag="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          # A re-run of a workflow keeps its run number; its release already exists.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "$tag is already released"
+            exit 0
+          fi
+          sha256sum --check lastwarhq-scanner.exe.sha256
+          hash=$(cut -d ' ' -f 1 lastwarhq-scanner.exe.sha256)
+          notes="Windows 10/11, 64-bit. Requires [Npcap](https://npcap.com/#download); see the README.
+
+          Built from ${GITHUB_SHA} by GitHub Actions.
+
+          SHA-256 of \`lastwarhq-scanner.exe\`: \`${hash}\`"
+          gh release create "$tag" lastwarhq-scanner.exe lastwarhq-scanner.exe.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "LastWarHQ Scanner ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "$notes" \
+            --latest
