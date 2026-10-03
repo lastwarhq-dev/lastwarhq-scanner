@@ -22,6 +22,7 @@ use crate::game::panel::{Member, Panel, Participant, VsScore};
 use crate::game::week::{ds_signups_open, vs_day};
 use crate::protocol::message::Message;
 use crate::protocol::sfs::Value;
+use crate::util::time::shifted;
 
 #[derive(Debug, Default)]
 pub struct View {
@@ -52,22 +53,31 @@ enum Scope {
 }
 
 impl View {
-    /// Takes in a panel message. Returns false for messages that change nothing.
+    /// Takes in a panel message at its capture time. Returns false for messages that change
+    /// nothing.
     pub fn apply(&mut self, message: &Message) -> bool {
-        let rolled = self.roll_vs_week(message.time);
+        self.apply_at(message, message.time)
+    }
+
+    /// Takes in a panel message as of `time`: its capture time on the game server's clock
+    /// (see [`State::game_clock`]), which every week, reset and VS-day decision then uses.
+    ///
+    /// [`State::game_clock`]: crate::app::state::State::game_clock
+    pub fn apply_at(&mut self, message: &Message, time: Duration) -> bool {
+        let rolled = self.roll_vs_week(time);
         // A message captured before the weekly reset but handled after it (the window's clock
         // can run the reset first) belongs to the week that has ended.
-        if self.vs_week.is_some_and(|w| vs_day(message.time).0 < w) {
+        if self.vs_week.is_some_and(|w| vs_day(time).0 < w) {
             return rolled;
         }
         let Some(data) = message.data() else {
             return rolled;
         };
         let command = message.command().unwrap_or_default();
-        let changed = self.note_account(command, data) || rolled;
+        let changed = self.note_account(command, data, time) || rolled;
         match command {
             "al.rank" => {
-                let list = read_list(data, "list", member, message.time);
+                let list = read_list(data, "list", member, time);
                 // An empty list means the message was not understood; it says nothing about
                 // which alliance this is.
                 let Some(list) = list else {
@@ -80,10 +90,10 @@ impl View {
                 true
             }
             "dragon.assign.player.info" => {
-                if !ds_signups_open(message.time) {
+                if !ds_signups_open(time) {
                     return changed;
                 }
-                match read_list(data, "users", participant, message.time) {
+                match read_list(data, "users", participant, time) {
                     Some(list) => {
                         self.ds_signups = Some(list);
                         true
@@ -91,7 +101,7 @@ impl View {
                     None => changed,
                 }
             }
-            "al.battle.rank.info" => self.apply_vs(data, message.time) || changed,
+            "al.battle.rank.info" => self.apply_vs(data, time) || changed,
             _ => changed,
         }
     }
@@ -154,7 +164,7 @@ impl View {
     /// Tracks the logged-in account. A different uid means the user switched accounts: every
     /// list and result belongs to the old account, so the view starts again. A different
     /// alliance on the same account clears the old alliance's data.
-    fn note_account(&mut self, command: &str, data: &Value) -> bool {
+    fn note_account(&mut self, command: &str, data: &Value, time: Duration) -> bool {
         let mut changed = false;
         if let Some(uid) = own_uid(command, data) {
             match &self.account {
@@ -175,7 +185,7 @@ impl View {
         let Some(account) = self.account.as_mut() else {
             return changed;
         };
-        changed |= account.absorb(command, data);
+        changed |= account.absorb(command, data, time);
         let after = account.alliance_id.clone();
         if before.is_some() && after.is_some() && before != after {
             self.clear(Scope::Alliance);
@@ -202,6 +212,68 @@ impl View {
         }
         self.roster_alliance = Some(id);
         Some(moved)
+    }
+
+    /// Moves every time recorded so far by `ms`: the panels' and the alliance name's and tag's.
+    /// Battle times come from the mail, on the game server's clock already, and stay.
+    pub fn shift_times(&mut self, ms: i64) {
+        let shift = |t: &mut Duration| *t = shifted(*t, ms);
+        if let Some(roster) = &mut self.roster {
+            shift(&mut roster.time);
+        }
+        if let Some(signups) = &mut self.ds_signups {
+            shift(&mut signups.time);
+        }
+        for day in self.vs_days.iter_mut().flatten() {
+            shift(&mut day.time);
+        }
+        if let Some(account) = &mut self.account {
+            for seen in [&mut account.alliance_name, &mut account.alliance_abbr]
+                .into_iter()
+                .flatten()
+            {
+                shift(&mut seen.1);
+            }
+        }
+    }
+
+    /// Puts the week right once the game server's clock is known (`now` on it), after
+    /// [`View::shift_times`] has moved what was recorded onto it. If this PC's clock had
+    /// already rolled into a week the server hasn't reached, the view goes back to the
+    /// server's week, so its messages aren't taken as late: what was recorded meanwhile belongs
+    /// to that week after all, but the mail's battles were picked for the wrong one and go
+    /// until the next read. Otherwise this is the usual reset.
+    ///
+    /// A VS day's ranking is taken only once the day is over, judged by this PC's clock until
+    /// now. A ranking whose corrected time shows its day was still on is dropped, to be
+    /// captured again once it has ended: its scores were still changing.
+    pub fn recalibrate_week(&mut self, now: Duration) -> bool {
+        let unfinished = self.drop_unfinished_vs_days();
+        let (week, _) = vs_day(now);
+        let rolled = match self.vs_week {
+            Some(ahead) if ahead > week => {
+                self.vs_week = Some(week);
+                self.ds_battles.clear();
+                true
+            }
+            _ => self.roll_vs_week(now),
+        };
+        unfinished || rolled
+    }
+
+    /// Drops the VS day rankings captured before their day ended. Returns whether any were.
+    fn drop_unfinished_vs_days(&mut self) -> bool {
+        let mut dropped = false;
+        for (d, day) in self.vs_days.iter_mut().enumerate() {
+            let over = day
+                .as_ref()
+                .is_none_or(|p| (d as i64 + 1) < vs_day(p.time).1);
+            if !over {
+                *day = None;
+                dropped = true;
+            }
+        }
+        dropped
     }
 
     /// Clears everything that belongs to one VS week once `time` falls in a later week: VS
@@ -800,7 +872,7 @@ mod tests {
         let account = view.account().unwrap();
         assert_eq!(account.uid, "me");
         assert_eq!(account.name.as_deref(), Some("Player One"));
-        assert_eq!(account.alliance_abbr.as_deref(), Some("EXA"));
+        assert_eq!(account.alliance_abbr(), Some("EXA"));
         assert_eq!(
             roster_uids(&view),
             ["1"],
@@ -903,8 +975,8 @@ mod tests {
         assert_eq!(
             (
                 account.alliance_id.as_deref(),
-                account.alliance_name.as_deref(),
-                account.alliance_abbr.as_deref()
+                account.alliance_name(),
+                account.alliance_abbr()
             ),
             (Some("new"), Some("New Alliance"), Some("NEW"))
         );

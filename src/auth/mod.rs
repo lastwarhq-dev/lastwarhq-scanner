@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::app::lock;
-use crate::app::state::{AuthStatus, AuthStep, State};
+use crate::app::state::{AuthStatus, AuthStep, State, SyncStatus};
 use crate::util::crypto::{base64url, random_bytes, sha256};
 use api::{ApiError, Me, Session};
 
@@ -88,6 +88,7 @@ pub fn sign_out(state: &Arc<Mutex<State>>) {
             return;
         }
         s.auth.generation += 1;
+        s.sync = SyncStatus::default();
         let saved = store::load();
         let removed = store::delete();
         let generation = s.auth.generation;
@@ -187,6 +188,7 @@ fn keep(state: &Mutex<State>, generation: u64, session: Session) -> Result<Sessi
     if s.auth.generation != generation {
         return Err("the sign-in was cancelled".into());
     }
+    s.sync = SyncStatus::default();
     store::save(&session)
         .map_err(|e| format!("signed in, but the token couldn't be saved: {e}"))?;
     s.auth = AuthStatus {
@@ -209,10 +211,31 @@ fn check(state: &Mutex<State>, token: &str, generation: u64) {
     }
     let result = api::me(token);
     let mut s = lock(state);
-    if apply_check(&mut s.auth, generation, result)
-        && let Err(why) = store::delete()
-    {
-        s.auth.step = AuthStep::Failed(format!(
+    if apply_check(&mut s.auth, generation, result) {
+        delete_refused(&mut s.auth);
+    }
+}
+
+/// LastWarHQ answered `401` to the current sign-in's token (call under the state lock, after
+/// checking the generation): the PC was disconnected. Signs out and deletes the token.
+pub fn token_refused(auth: &mut AuthStatus) {
+    mark_refused(auth);
+    delete_refused(auth);
+}
+
+/// Marks the user signed out by a refused token. The generation is raised, as for a sign-out,
+/// so a call still on its way with the old token (a `me` check, say) can't sign them back in.
+fn mark_refused(auth: &mut AuthStatus) {
+    *auth = AuthStatus {
+        step: AuthStep::Failed("this PC was disconnected".into()),
+        generation: auth.generation + 1,
+        ..AuthStatus::default()
+    };
+}
+
+fn delete_refused(auth: &mut AuthStatus) {
+    if let Err(why) = store::delete() {
+        auth.step = AuthStep::Failed(format!(
             "this PC was disconnected, but the old token couldn't be removed: {why}"
         ));
     }
@@ -235,11 +258,7 @@ fn apply_check(auth: &mut AuthStatus, generation: u64, result: Result<Me, ApiErr
             false
         }
         Err(ApiError::Unauthorized) => {
-            *auth = AuthStatus {
-                step: AuthStep::Failed("this PC was disconnected".into()),
-                generation,
-                ..AuthStatus::default()
-            };
+            mark_refused(auth);
             true
         }
         Err(other) => {
@@ -282,6 +301,22 @@ mod tests {
         // A refusal from the old generation doesn't delete whatever is stored now.
         assert!(!apply_check(&mut auth, 1, Err(ApiError::Unauthorized)));
         assert_eq!(auth.step, AuthStep::Idle);
+    }
+
+    #[test]
+    fn a_check_finishing_after_a_sync_refused_the_token_changes_nothing() {
+        // `me` was asked in generation 5; then a sync was answered 401.
+        let mut auth = signed_in(5);
+        mark_refused(&mut auth);
+        assert_eq!(auth.user, None);
+        assert_eq!(auth.generation, 6);
+        // The `me` answer arrives late, and successful: it must not sign the user back in.
+        assert!(!apply_check(&mut auth, 5, Ok(me_answer())));
+        assert_eq!(auth.user, None);
+        assert_eq!(
+            auth.step,
+            AuthStep::Failed("this PC was disconnected".into())
+        );
     }
 
     #[test]

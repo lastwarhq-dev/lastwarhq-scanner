@@ -12,6 +12,7 @@ pub mod game;
 pub mod mail;
 pub mod net;
 pub mod protocol;
+pub mod sync;
 pub mod ui;
 pub mod update;
 pub mod util;

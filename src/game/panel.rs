@@ -9,7 +9,7 @@ use crate::util::time::utc_iso;
 /// One panel's newest list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Panel<T> {
-    /// When the list arrived (capture time).
+    /// When the list arrived: its capture time, on the game server's clock.
     pub time: Duration,
     /// Every entry had a readable uid. When false, a player missing from `entries` may still
     /// be on the panel.
@@ -28,6 +28,25 @@ impl<T> Panel<T> {
             players.join(",")
         )
     }
+}
+
+/// The longest name the API takes, in characters.
+pub const MAX_NAME: usize = 64;
+/// The longest alliance tag the API takes, in characters.
+pub const MAX_TAG: usize = 16;
+
+/// Text from the game as the API takes it: without control characters, and 1 to `max`
+/// characters long. Anything else would get the whole upload refused, so it is sent as
+/// unknown (`null`).
+pub fn game_text(value: Option<&str>, max: usize) -> Option<String> {
+    let text: String = value?.chars().filter(|c| !c.is_control()).collect();
+    let len = text.chars().count();
+    (1..=max).contains(&len).then_some(text)
+}
+
+/// A power, kill count or score as the API takes it: 0 or more, else unknown.
+pub fn count(value: Option<i64>) -> Option<i64> {
+    value.filter(|v| *v >= 0)
 }
 
 /// A row of the alliance member list, `al.rank`.
@@ -50,10 +69,10 @@ impl Member {
         format!(
             "{{\"uid\":{},\"name\":{},\"rank\":{},\"power\":{},\"armyKill\":{}}}",
             escape(&self.uid),
-            text(&self.name),
+            text(game_text(self.name.as_deref(), MAX_NAME).as_deref()),
             int(self.rank),
-            int(self.power),
-            int(self.army_kill)
+            int(count(self.power)),
+            int(count(self.army_kill))
         )
     }
 }
@@ -84,7 +103,7 @@ impl Participant {
         format!(
             "{{\"uid\":{},\"heroPower\":{},\"chooseTimeList\":{slots},\"group\":{}}}",
             escape(&self.uid),
-            int(self.hero_power),
+            int(count(self.hero_power)),
             int(self.group)
         )
     }
@@ -106,13 +125,13 @@ impl VsScore {
         format!(
             "{{\"uid\":{},\"score\":{}}}",
             escape(&self.uid),
-            int(self.score)
+            int(count(self.score))
         )
     }
 }
 
-fn text(value: &Option<String>) -> String {
-    value.as_deref().map_or_else(|| "null".into(), escape)
+fn text(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".into(), escape)
 }
 
 fn int(value: Option<i64>) -> String {
@@ -127,13 +146,13 @@ mod tests {
     fn entries_as_json() {
         let member = Member {
             uid: "9".into(),
-            name: Some("a\"b\\c\u{1}".into()),
+            name: Some("a\"b\\c".into()),
             rank: Some(4),
             ..Member::default()
         };
         assert_eq!(
             member.to_json(),
-            r#"{"uid":"9","name":"a\"b\\c\u0001","rank":4,"power":null,"armyKill":null}"#
+            r#"{"uid":"9","name":"a\"b\\c","rank":4,"power":null,"armyKill":null}"#
         );
         let participant = Participant {
             uid: "9".into(),
@@ -168,6 +187,43 @@ mod tests {
                 r#"{{"updated":"2026-10-03T10:00:00Z","complete":false,"players":[{}]}}"#,
                 member.to_json()
             )
+        );
+    }
+
+    #[test]
+    fn values_the_api_would_refuse_are_sent_as_unknown() {
+        assert_eq!(
+            game_text(Some("Ex\u{1}am\nple"), MAX_NAME),
+            Some("Example".into())
+        );
+        assert_eq!(game_text(Some("\u{7}"), MAX_NAME), None, "nothing left");
+        assert_eq!(game_text(Some(""), MAX_NAME), None);
+        assert_eq!(game_text(None, MAX_NAME), None);
+        let long = "é".repeat(MAX_NAME);
+        assert_eq!(
+            game_text(Some(&long), MAX_NAME),
+            Some(long.clone()),
+            "64 characters"
+        );
+        assert_eq!(game_text(Some(&format!("{long}x")), MAX_NAME), None);
+        assert_eq!(
+            game_text(Some("ABCDEFGHIJKLMNOPQ"), MAX_TAG),
+            None,
+            "17 characters"
+        );
+        assert_eq!(count(Some(0)), Some(0));
+        assert_eq!(count(Some(-1)), None);
+
+        let member = Member {
+            uid: "9".into(),
+            name: Some("\u{1}".into()),
+            power: Some(-5),
+            army_kill: Some(7),
+            ..Member::default()
+        };
+        assert_eq!(
+            member.to_json(),
+            r#"{"uid":"9","name":null,"rank":null,"power":null,"armyKill":7}"#
         );
     }
 }

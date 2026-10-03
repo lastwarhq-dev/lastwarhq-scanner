@@ -1,11 +1,14 @@
 //! What the capture thread, the mail loader and the window share.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::app::export::Seen;
+use crate::auth::api::SyncReply;
 use crate::game::battle::DsBattle;
 use crate::game::view::View;
 use crate::protocol::message::Message;
 use crate::update::Version;
+use crate::util::time::shifted;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -14,6 +17,29 @@ pub struct State {
     pub mail: MailStatus,
     pub update: UpdateStatus,
     pub auth: AuthStatus,
+    pub sync: SyncStatus,
+}
+
+/// Uploads to LastWarHQ. Cleared by every sign-in and sign-out.
+#[derive(Debug, Default)]
+pub struct SyncStatus {
+    /// When the last upload was accepted (this PC's clock), and what LastWarHQ said.
+    pub synced: Option<Duration>,
+    pub reply: Option<SyncReply>,
+    /// The content of the last accepted upload; the same content isn't sent again.
+    pub sent: Option<String>,
+    /// Content LastWarHQ refused as invalid; it isn't sent again until it changes.
+    pub refused: Option<String>,
+    /// The alliance fields LastWarHQ has accepted (with the value and time they were sent
+    /// with), one per field; see the payload's `alliance`.
+    pub alliance_sent: Vec<Seen>,
+    /// No upload before this instant (a monotonic clock, so the PC's clock changing can't
+    /// shorten a wait).
+    pub next_at: Option<Instant>,
+    /// An upload is on its way.
+    pub uploading: bool,
+    /// Why the last upload failed.
+    pub error: Option<String>,
 }
 
 /// Signing in to LastWarHQ. The token itself is kept only in Windows Credential Manager.
@@ -85,7 +111,14 @@ pub struct Capture {
     pub last_heartbeat: Option<Duration>,
     pub messages: u64,
     pub last_message: Option<Duration>,
+    /// The game server's clock minus this PC's, in milliseconds, from the last ping reply.
+    pub clock_offset_ms: Option<i64>,
 }
+
+/// A clock offset larger than this is taken as a misread `serverTime`, not a wrong PC clock.
+const MAX_CLOCK_OFFSET_MS: i64 = 24 * 3600 * 1000;
+/// Offset changes up to this are network delay, not the clocks moving apart.
+const CLOCK_STEADY_MS: i64 = 1000;
 
 /// What the view's data belongs to: the account, its alliance and the VS week.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,15 +146,54 @@ impl State {
     pub fn record(&mut self, message: &Message) {
         self.capture.messages += 1;
         self.capture.last_message = Some(message.time);
+        if let Some(server) = message.server_time() {
+            let offset = server.as_millis() as i64 - message.time.as_millis() as i64;
+            // Network delay moves each reading by a few milliseconds; keeping the offset until
+            // it moves by more than a second keeps the payload's times, and so its content,
+            // steady.
+            if offset.abs() <= MAX_CLOCK_OFFSET_MS {
+                match self.capture.clock_offset_ms {
+                    None => self.calibrate(offset, message.time),
+                    Some(old) if (old - offset).abs() > CLOCK_STEADY_MS => {
+                        self.capture.clock_offset_ms = Some(offset);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        // The time moves onto the game server's clock now, with the difference known now, so a
+        // later correction never moves what was already seen.
+        let time = self.game_clock(message.time);
         let before = self.identity();
-        self.view.apply(message);
+        self.view.apply_at(message, time);
         self.forget_mail_if_changed(&before);
     }
 
-    /// Runs the weekly reset from the clock, so it happens even when no messages arrive.
+    /// A time from this PC's clock on the game server's clock, once a ping reply has shown the
+    /// difference; until then, as it is.
+    pub fn game_clock(&self, time: Duration) -> Duration {
+        shifted(time, self.capture.clock_offset_ms.unwrap_or(0))
+    }
+
+    /// The first ping reply, at `at` on this PC's clock, shows the clocks differ by `offset`
+    /// ms. Everything recorded before it is on this PC's clock: it moves onto the server's,
+    /// once, and the week is put right in case this PC's clock had already crossed a reset the
+    /// server hasn't (mail read under the wrong week is forgotten until the next read).
+    /// Everything recorded afterwards is on the server's clock from the start.
+    fn calibrate(&mut self, offset: i64, at: Duration) {
+        self.capture.clock_offset_ms = Some(offset);
+        self.view.shift_times(offset);
+        self.mail.loaded = self.mail.loaded.map(|t| shifted(t, offset));
+        let before = self.identity();
+        self.view.recalibrate_week(self.game_clock(at));
+        self.forget_mail_if_changed(&before);
+    }
+
+    /// Runs the weekly reset from the clock, so it happens even when no messages arrive. `now`
+    /// is this PC's time; the reset follows the game server's clock.
     pub fn tick(&mut self, now: Duration) {
         let before = self.identity();
-        self.view.roll_vs_week(now);
+        self.view.roll_vs_week(self.game_clock(now));
         self.forget_mail_if_changed(&before);
     }
 
@@ -131,7 +203,8 @@ impl State {
         self.identity()
     }
 
-    /// Applies a finished mail load, read since `started`, as of `now` (when reading finished).
+    /// Applies a finished mail load, read since `started`, as of `now` (this PC's time when
+    /// reading finished; recorded on the game server's clock).
     /// If the account, alliance or week changed while reading, the result is dropped; the next
     /// read picks up the change.
     pub fn finish_mail_load(
@@ -141,6 +214,7 @@ impl State {
         now: Duration,
     ) {
         self.tick(now);
+        let now = self.game_clock(now);
         if started.moved_on(&self.identity()) {
             return;
         }
@@ -306,6 +380,38 @@ mod tests {
         let started = state.start_mail_load(Duration::from_secs(SATURDAY + 600));
         state.finish_mail_load(&started, Ok(vec![]), Duration::from_secs(SATURDAY + 601));
         assert_eq!(state.mail.error, None);
+    }
+
+    #[test]
+    fn times_move_to_the_game_servers_clock() {
+        let mut state = State::default();
+        let t = Duration::from_secs(SATURDAY);
+        assert_eq!(state.game_clock(t), t, "no ping reply yet");
+        // The PC is 90 s behind the server.
+        state.record(&Message::ping_for_test(
+            (SATURDAY as i64 + 90) * 1000,
+            SATURDAY,
+        ));
+        assert_eq!(state.capture.clock_offset_ms, Some(90_000));
+        assert_eq!(state.game_clock(t), t + Duration::from_secs(90));
+        // A reading 300 ms off is network delay: the offset stays put.
+        state.record(&Message::ping_for_test(
+            (SATURDAY as i64 + 90) * 1000 + 300,
+            SATURDAY,
+        ));
+        assert_eq!(state.capture.clock_offset_ms, Some(90_000));
+        // Two seconds off is the clocks moving apart.
+        state.record(&Message::ping_for_test(
+            (SATURDAY as i64 + 92) * 1000,
+            SATURDAY,
+        ));
+        assert_eq!(state.capture.clock_offset_ms, Some(92_000));
+        // A serverTime two days off is a misreading, not a clock: the last good one stays.
+        state.record(&Message::ping_for_test(
+            (SATURDAY as i64 + 2 * 86_400) * 1000,
+            SATURDAY,
+        ));
+        assert_eq!(state.capture.clock_offset_ms, Some(92_000));
     }
 
     #[test]

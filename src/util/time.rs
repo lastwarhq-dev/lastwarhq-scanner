@@ -9,6 +9,11 @@ pub fn now() -> Duration {
         .unwrap_or_default()
 }
 
+/// `time` moved by `ms` milliseconds, either way (no earlier than the epoch).
+pub fn shifted(time: Duration, ms: i64) -> Duration {
+    Duration::from_millis((time.as_millis() as i64 + ms).max(0) as u64)
+}
+
 /// (year, month 1–12, day) for days since 1970-01-01 (Howard Hinnant's algorithm).
 pub fn civil(days: u64) -> (i64, u32, u32) {
     let z = days as i64 + 719_468;

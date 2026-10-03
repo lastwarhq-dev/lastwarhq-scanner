@@ -76,6 +76,7 @@ unsafe extern "system" {
 const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: u32 = 4;
 const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
 const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+const WINHTTP_QUERY_RETRY_AFTER: u32 = 36;
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 const HTTPS_PORT: u16 = 443;
 
@@ -110,6 +111,8 @@ fn failure(what: &str) -> String {
 pub struct Response {
     pub status: u32,
     pub body: Vec<u8>,
+    /// The `Retry-After` header, in seconds, if the server sent one as a number.
+    pub retry_after: Option<u32>,
 }
 
 /// Fetches `https://{host}{path}` with an extra request header (or `""` for none), following
@@ -209,6 +212,18 @@ pub fn request(
         {
             return Err(failure(host));
         }
+        // Absent unless the server asks to wait (`429`, `503`).
+        let mut retry_after: u32 = 0;
+        let mut len = size_of::<u32>() as u32;
+        let retry_after = (WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_RETRY_AFTER | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            (&raw mut retry_after).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+        ) != 0)
+            .then_some(retry_after);
         let mut received = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
@@ -225,6 +240,7 @@ pub fn request(
             if read == 0 {
                 return Ok(Response {
                     status,
+                    retry_after,
                     body: received,
                 });
             }

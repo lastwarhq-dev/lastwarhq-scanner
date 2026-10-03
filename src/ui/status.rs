@@ -3,10 +3,11 @@
 
 use std::time::Duration;
 
-use crate::app::state::{AuthStatus, AuthStep, Install, State, UpdateStatus};
+use crate::app::state::{AuthStatus, AuthStep, Install, State, SyncStatus, UpdateStatus};
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
 use crate::game::week::{ds_signups_open, vs_day};
+use crate::sync::{self, Hold};
 use crate::update::Version;
 
 /// How something is doing, drawn as a coloured circle with a symbol.
@@ -79,10 +80,12 @@ pub const DAY_NAMES: [&str; 6] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const IN_SYNC: &str = "In sync";
 
-/// The window's content at `now`.
+/// The window's content at `now` (this PC's time). The heartbeat is timed on this PC's clock,
+/// like the heartbeat itself; VS days and the Desert Storm weekend follow the game server's.
 pub fn screen(state: &State, now: Duration) -> Screen {
     let c = &state.capture;
     let view = &state.view;
+    let game_now = state.game_clock(now);
 
     let (connection, connection_mark) = if !c.running {
         match &c.error {
@@ -117,7 +120,7 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         None => (Mark::Action, "Open the member list".to_string()),
     };
     let signups = match view.ds_signups {
-        _ if !ds_signups_open(now) => (Mark::Off, "Closed until Monday".to_string()),
+        _ if !ds_signups_open(game_now) => (Mark::Off, "Closed until Monday".to_string()),
         Some(_) => (Mark::Done, IN_SYNC.to_string()),
         None => (Mark::Action, "Open the DS participants".to_string()),
     };
@@ -139,7 +142,7 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         row("DS results", results),
     ];
 
-    let (_, today) = vs_day(now);
+    let (_, today) = vs_day(game_now);
     let vs_days: [Day; 6] = std::array::from_fn(|d| {
         let day = d as i64 + 1;
         if view.vs_days[d].is_some() {
@@ -177,7 +180,12 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         mark,
         connection,
         connection_mark,
-        sign_in: sign_in_row(&state.auth, view.alliance_id()),
+        sign_in: sign_in_row(
+            &state.auth,
+            view.alliance_id(),
+            &state.sync,
+            sync::ready(state),
+        ),
         rows,
         vs_hint,
         vs_days,
@@ -187,7 +195,12 @@ pub fn screen(state: &State, now: Duration) -> Screen {
 
 /// The LastWarHQ row: who is signed in, or what clicking it does. Once signed in, it also says
 /// if the alliance the game shows isn't one the user manages, as that one can't be synced.
-fn sign_in_row(auth: &AuthStatus, alliance: Option<&str>) -> Row {
+fn sign_in_row(
+    auth: &AuthStatus,
+    alliance: Option<&str>,
+    sync: &SyncStatus,
+    hold: Result<(), Hold>,
+) -> Row {
     let (mark, text) = match (&auth.user, &auth.step) {
         (_, AuthStep::SigningIn) => (Mark::Pending, "Finish signing in in the browser".into()),
         (Some(user), AuthStep::SigningOut) => (Mark::Pending, format!("{user} · signing out")),
@@ -195,17 +208,43 @@ fn sign_in_row(auth: &AuthStatus, alliance: Option<&str>) -> Row {
         (None, _) => (Mark::Action, "Click to sign in".into()),
         (Some(user), AuthStep::Checking) => (Mark::Pending, format!("{user} · checking")),
         (Some(user), AuthStep::Failed(why)) => (Mark::Failed, format!("{user} · {why}")),
-        (Some(user), AuthStep::Idle) => match (&auth.alliances, alliance) {
-            (Some(managed), Some(ours))
-                if !managed.iter().any(|id| id.eq_ignore_ascii_case(ours)) =>
-            {
+        (Some(user), AuthStep::Idle) => {
+            let unmanaged = match (&auth.alliances, alliance) {
+                (Some(managed), Some(ours)) => {
+                    !managed.iter().any(|id| id.eq_ignore_ascii_case(ours))
+                }
+                _ => false,
+            };
+            if sync.uploading {
+                (Mark::Pending, format!("{user} · syncing"))
+            } else if let Some(why) = &sync.error {
+                (Mark::Failed, format!("{user} · sync failed: {why}"))
+            } else if unmanaged && sync.synced.is_none() {
                 (
                     Mark::Action,
                     format!("{user} · doesn't manage this alliance"),
                 )
+            } else if let Err(hold) = hold {
+                let waiting = match hold {
+                    Hold::NoAlliance => "waiting for the alliance",
+                    Hold::NoFullRoster | Hold::SignedOut => "waiting for the member list",
+                    Hold::NoGameClock => "waiting for the game's clock",
+                };
+                (Mark::Pending, format!("{user} · {waiting}"))
+            } else if let Some(t) = sync.synced {
+                let secs = t.as_secs();
+                (
+                    Mark::Done,
+                    format!(
+                        "{user} · synced {:02}:{:02} UTC",
+                        secs / 3600 % 24,
+                        secs / 60 % 60
+                    ),
+                )
+            } else {
+                (Mark::Done, user.clone())
             }
-            _ => (Mark::Done, user.clone()),
-        },
+        }
     };
     Row {
         label: "LastWarHQ",
@@ -217,8 +256,8 @@ fn sign_in_row(auth: &AuthStatus, alliance: Option<&str>) -> Row {
 /// "[ABC] Alliance name", from the account's own messages. The member list carries only the
 /// alliance id, so until a name arrives the id stands in.
 fn alliance_text(account: Option<&Account>, id: &str) -> String {
-    let name = account.and_then(|a| a.alliance_name.as_deref());
-    let abbr = account.and_then(|a| a.alliance_abbr.as_deref());
+    let name = account.and_then(Account::alliance_name);
+    let abbr = account.and_then(Account::alliance_abbr);
     match (abbr, name) {
         (Some(abbr), Some(name)) => format!("[{abbr}] {name}"),
         (None, Some(name)) => name.to_string(),
@@ -495,9 +534,50 @@ mod tests {
     }
 
     #[test]
+    fn the_sign_in_row_shows_the_sync() {
+        let auth = AuthStatus {
+            user: Some("example".into()),
+            ..AuthStatus::default()
+        };
+        let ours = Some("0123456789abcdef0123456789abcdef");
+        let row = |sync: &SyncStatus, hold| {
+            let r = sign_in_row(&auth, ours, sync, hold);
+            (r.mark, r.text)
+        };
+        let mut sync = SyncStatus::default();
+        assert_eq!(
+            row(&sync, Err(Hold::NoFullRoster)),
+            (
+                Mark::Pending,
+                "example · waiting for the member list".into()
+            )
+        );
+        assert_eq!(row(&sync, Ok(())), (Mark::Done, "example".into()));
+        sync.uploading = true;
+        assert_eq!(
+            row(&sync, Ok(())),
+            (Mark::Pending, "example · syncing".into())
+        );
+        sync.uploading = false;
+        sync.synced = Some(Duration::from_secs(SATURDAY + 5 * 60));
+        assert_eq!(
+            row(&sync, Ok(())),
+            (Mark::Done, "example · synced 10:05 UTC".into())
+        );
+        sync.error = Some("lastwarhq.dev: no connection".into());
+        assert_eq!(
+            row(&sync, Ok(())),
+            (
+                Mark::Failed,
+                "example · sync failed: lastwarhq.dev: no connection".into()
+            )
+        );
+    }
+
+    #[test]
     fn the_sign_in_row_follows_the_sign_in() {
         let row = |auth: &AuthStatus, alliance| {
-            let r = sign_in_row(auth, alliance);
+            let r = sign_in_row(auth, alliance, &SyncStatus::default(), Ok(()));
             (r.mark, r.text)
         };
         let mut auth = AuthStatus::default();
@@ -570,7 +650,7 @@ mod tests {
     fn alliance_from_the_member_list_has_only_its_id() {
         let account = Account {
             uid: "7".into(),
-            alliance_abbr: Some("EXA".into()),
+            alliance_abbr: Some(("EXA".into(), Duration::ZERO)),
             ..Account::default()
         };
         assert_eq!(alliance_text(Some(&account), "ours"), "[EXA]");

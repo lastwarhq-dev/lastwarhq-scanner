@@ -58,7 +58,7 @@ Only one copy of the tool runs at a time.
 |---|---|
 | Headline | **All in sync** (green tick): the game is connected, every row has a green tick (or is closed), and every finished VS day is loaded. **Open the game panels** (amber): connected, but something is missing; the rows say what. **Waiting for the game** or **Starting capture** (grey): no game connection yet. **Not capturing** (red): capture failed. |
 | Line under it | The game connection. Green: connected, with a heartbeat (every 4 s) in the last 12 s. Grey: searching for the game, or no heartbeat. Red: why capture failed. |
-| LastWarHQ | Your LastWarHQ sign-in: your username once signed in; until then, **Click to sign in**. See [Signing in to LastWarHQ](#signing-in-to-lastwarhq). It doesn't count towards the headline. |
+| LastWarHQ | Your LastWarHQ sign-in and sync: your username, and once synced, **synced HH:MM UTC** (or what the sync is waiting for, or why it failed); until signed in, **Click to sign in**. See [Signing in to LastWarHQ](#signing-in-to-lastwarhq) and [Syncing](#syncing). It doesn't count towards the headline. |
 | Alliance | The account's alliance, as `[ABBR] Name`. Click the row to copy the alliance ID. The member list names the alliance only by id; the name comes with the identified account's profile or the Desert Storm participants panel, and until then the row shows the id. Until either has arrived, **Open the member list**. |
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
@@ -87,6 +87,25 @@ shows your username; if anything fails, the tab says why the sign-in didn't fini
 - Click the row again to sign out: the token is deleted, and LastWarHQ is told to disconnect
   this PC. If Credential Manager won't delete the token, you count as signed out only once
   LastWarHQ confirms the disconnect; otherwise the row says sign-out failed.
+
+### Syncing
+
+Once you're signed in, the tool uploads the [data payload](#data-payload) to LastWarHQ
+(`POST /scanner-api/v1/sync`) by itself:
+
+- Only once the alliance is known, its **full member list** has been loaded (every entry
+  readable) and the game server's clock is known (from its first ping reply). Until then the
+  LastWarHQ row says what it's waiting for.
+- Only when something has changed since the last upload, and at most once a minute, or less
+  often if LastWarHQ asks. Waits count from when LastWarHQ answers, on a clock the PC's time
+  setting can't move.
+- LastWarHQ decides whether you manage the alliance. If not, the row says so, and the tool
+  tries again every 5 minutes, in case the alliance is added on the site.
+- If LastWarHQ refuses the data as invalid, the row says why, and the same data isn't sent
+  again; the next change is. Other failures (no connection, a server error) are retried after
+  a minute. If LastWarHQ no longer accepts the sign-in, the token is deleted and the row asks
+  you to sign in again.
+- After an upload, the row shows **synced HH:MM UTC**.
 
 ### Desert Storm sign-ups
 
@@ -138,8 +157,27 @@ becomes **Try again**.
 
 ### Data payload
 
-The tool builds this payload for a sync to other tools (`src/app/export.rs`); **Copy JSON**
-copies it, so it can be checked by hand. Nothing sends it yet.
+The tool syncs this payload to LastWarHQ (see [Syncing](#syncing)); **Copy JSON** copies the
+same, so it can be checked by hand. It's built in `src/app/export.rs`.
+
+- **Times** are on the game server's clock, since LastWarHQ orders uploads from several PCs by
+  them: the tool reads the server's time from its ping replies (`serverTime`, every 4 s), and
+  each time it records is moved by the difference known when it is recorded, so a later
+  correction never changes it. The week, the weekly reset, today's VS day and the Desert
+  Storm weekend follow the server's clock too. Battle times come from the result mails, which
+  already carry the server's time. A ping reply more than a day off this PC's clock is taken
+  as a misreading and ignored.
+- **Before the first ping reply** only this PC's clock is known, and what is recorded meanwhile
+  is on it. When the first reply arrives, those times are moved onto the server's clock, once,
+  and if the PC's clock had already crossed a weekly reset the server hasn't, the week is put
+  back (mail read under the wrong week is read again at the next read). A VS day's ranking
+  that turns out to have been captured before its day ended on the server is dropped, to be
+  captured again once the day is over. The sync waits for that
+  first reply.
+- **Values LastWarHQ would refuse are sent as unknown** (`null`), so one odd value can't get a
+  whole upload refused: control characters are removed from names, and a name that is then
+  empty or over 64 characters (16 for the tag), a negative power, kill count or score, or a
+  warzone outside 1–99,999 is `null`.
 
 Each panel's newest list is sent as the game sent it, and every entry carries the player's
 `uid`. The tool doesn't merge panels or work anything out from them; the receiver joins them
@@ -151,7 +189,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
   "schemaVersion": 2,
   "week": "2026-09-28",
   "generated": "2026-10-04T12:00:00Z",
-  "alliance": { "id": "…", "name": "…", "abbr": "…", "warzone": 901 },
+  "alliance": { "id": "…", "name": "…", "abbr": "…", "warzone": 901, "updated": "…Z" },
   "roster": {
     "updated": "…Z", "complete": true,
     "players": [{ "uid": "…", "name": "…", "rank": 4, "power": 250000000, "armyKill": 2000000 }]
@@ -178,6 +216,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
 | `alliance.id` | The alliance the data belongs to: from the logged-in account's own messages, or, until those name it, from the member list. `alliance` is `null` until either has arrived. The logged-in player isn't named separately: they are one of the `roster` players. |
 | `alliance.name`, `alliance.abbr` | From the account's profile or the Desert Storm participants panel; `null` while the alliance is known only from the member list. |
 | `alliance.warzone` | The `serverId` the member list gives its members, when every member that has one has the same; `null` until the member list has arrived, or if they differ. Sent once here rather than per member. |
+| `alliance.updated` | When the fields sent were seen in the game: name and tag with the profile or the Desert Storm panel, the warzone with the member list, each with its own time. LastWarHQ takes one `updated` for the three, so an upload carries only the fields seen at that one time and `null` (no observation) for the rest; the others follow in the next uploads, oldest first. With nothing seen, the member list's time. |
 | `updated` | When that panel's list arrived (UTC). |
 | `complete` | Every entry in the list could be read. When `false`, a player missing from `players` may still be on the panel. |
 | `roster` | The alliance member list. `rank` is 1–5 (R5 highest). Kept across the weekly reset. |
@@ -221,9 +260,9 @@ cleared. Once the account's alliance is known, another alliance's member list is
   messages are decoded; the game's own requests are encrypted and only counted. It sends
   nothing to the game. Its only connections of its own, all over HTTPS, are to GitHub
   (`api.github.com` and `github.com`: one an hour to check for a new release, and, when you
-  press Update now, to download it) and to LastWarHQ (`lastwarhq.dev`: signing in, and
-  checking the sign-in at start-up). It listens only while you sign in, on `127.0.0.1`, for
-  the browser to come back.
+  press Update now, to download it) and to LastWarHQ (`lastwarhq.dev`: signing in, checking
+  the sign-in at start-up, and syncing at most once a minute). It listens only while you sign
+  in, on `127.0.0.1`, for the browser to come back.
 - **Hands off the game.** It never hooks, reads the memory of, or modifies the game. The only
   game file it reads is the mail database.
 - **Memory only.** Data lives in memory while the tool runs and is gone when it closes. It
@@ -283,7 +322,9 @@ cargo fmt --check
   For updates, they cover versions, release replies, checksum files and swapping the exe
   (on files in a temporary folder). For signing in, they cover PKCE (against RFC 7636's
   example), the connect address, API answers and errors, and the callback listener, which
-  they drive through a socket on `127.0.0.1`.
+  they drive through a socket on `127.0.0.1`. For syncing, they cover when an upload is due,
+  the waits LastWarHQ asks for, its answers and errors, the game-clock correction and the
+  values sent as unknown.
 - No test uses real game data: no captures, no game files. None of them need Npcap or the game
   installed, none connect to the internet, and none touch Credential Manager.
 
@@ -314,6 +355,7 @@ that can create releases. The workflow uses only GitHub's own actions (`checkout
 | `src/update` | Checking GitHub for releases; downloading, checking and swapping in the new exe |
 | `src/auth` | Signing in to LastWarHQ: browser sign-in, the scanner API, the stored token |
 | `src/net` | HTTPS through WinHTTP |
+| `src/sync.rs` | Uploading the payload to LastWarHQ when it changes |
 | `src/util` | JSON and UTC time helpers |
 | `.github/workflows` | The release build |
 

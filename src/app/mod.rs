@@ -18,6 +18,7 @@ use crate::capture::adapters::{self, Adapter};
 use crate::capture::npcap::{self, Capture};
 use crate::capture::pipeline::{GAME_PORTS, Pipeline};
 use crate::mail::database as mail;
+use crate::sync;
 use crate::ui::window;
 use crate::update::{self, install};
 use crate::util::time;
@@ -76,6 +77,7 @@ pub fn run() -> Result<(), String> {
     }
     update::watch(Arc::clone(&state));
     auth::start(&state);
+    sync::watch(Arc::clone(&state));
     window::run(state)
 }
 
