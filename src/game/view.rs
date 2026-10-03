@@ -1,24 +1,25 @@
-//! The current view: one record per player, merged from every panel message seen.
-//! Each message updates only the fields it carries; the newest value wins.
-//! The member and participant panels list the whole alliance, so players missing from the
-//! newest of those lists have left.
+//! The current view: the newest list from each panel, kept as the panel sent it, and this
+//! week's Desert Storm battles from the mail. Panels are not merged; each entry carries its
+//! player's uid, and whoever receives the data joins panels by it.
 //!
 //! The view belongs to one account, one alliance and one VS week. When any of them changes,
 //! [`View::clear`] drops what belonged to the old one:
 //!
 //! | Change | Cleared |
 //! |---|---|
-//! | VS week | VS scores, Desert Storm results, sign-ups and team assignments |
-//! | Alliance | the above, and every player record |
+//! | VS week | VS rankings, Desert Storm sign-ups and battles |
+//! | Alliance | the above, and the member list |
 //! | Account | everything, including the account itself |
+//!
+//! Desert Storm sign-ups are also cleared, and new ones ignored, from Saturday until the
+//! weekly reset (see [`ds_signups_open`]).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use crate::game::account::{Account, own_uid};
 use crate::game::battle::DsBattle;
-use crate::game::player::{DsResult, Player};
-use crate::game::week::vs_day;
+use crate::game::panel::{Member, Panel, Participant, VsScore};
+use crate::game::week::{ds_signups_open, vs_day};
 use crate::protocol::message::Message;
 use crate::protocol::sfs::Value;
 
@@ -28,18 +29,16 @@ pub struct View {
     /// The alliance whose member list the roster came from. Used as our alliance until the
     /// account's own messages name it.
     roster_alliance: Option<String>,
-    players: BTreeMap<String, Player>,
-    /// VS week the stored `vs_scores` belong to.
+    /// VS week the view's data belongs to.
     vs_week: Option<u64>,
-    /// Every VS score seen this week by uid, so a ranking opened before the member list still
-    /// counts. Opponents are kept here too but never become players.
-    vs_seen: HashMap<String, [Option<i64>; 6]>,
+    /// The alliance member list.
+    pub roster: Option<Panel<Member>>,
+    /// The Desert Storm participants panel; `None` from Saturday to the weekly reset.
+    pub ds_signups: Option<Panel<Participant>>,
+    /// Each completed VS day's ranking, Monday (0) to Saturday (5).
+    pub vs_days: [Option<Panel<VsScore>>; 6],
     /// This week's Desert Storm battles, from the last mail load.
     ds_battles: Vec<DsBattle>,
-    /// When each part of the view was last updated (capture time).
-    pub roster_at: Option<Duration>,
-    pub signups_at: Option<Duration>,
-    pub vs_at: Option<Duration>,
 }
 
 /// What [`View::clear`] drops; each scope includes the ones before it.
@@ -53,44 +52,48 @@ enum Scope {
 }
 
 impl View {
-    /// Merges a panel message into the view. Returns false for messages that change nothing.
+    /// Takes in a panel message. Returns false for messages that change nothing.
     pub fn apply(&mut self, message: &Message) -> bool {
-        let new_week = self.roll_vs_week(message.time);
+        let rolled = self.roll_vs_week(message.time);
         // A message captured before the weekly reset but handled after it (the window's clock
         // can run the reset first) belongs to the week that has ended.
         if self.vs_week.is_some_and(|w| vs_day(message.time).0 < w) {
-            return new_week;
+            return rolled;
         }
         let Some(data) = message.data() else {
-            return new_week;
+            return rolled;
         };
         let command = message.command().unwrap_or_default();
-        let changed = self.note_account(command, data) || new_week;
-        let (list, stamp, changed) = match command {
+        let changed = self.note_account(command, data) || rolled;
+        match command {
             "al.rank" => {
-                let list = alliance_members(data);
+                let list = read_list(data, "list", member, message.time);
                 // An empty list means the message was not understood; it says nothing about
                 // which alliance this is.
-                if list.players.is_empty() {
+                let Some(list) = list else {
+                    return changed;
+                };
+                if self.note_roster_alliance(data).is_none() {
                     return changed;
                 }
-                match self.note_roster_alliance(data) {
-                    Some(moved) => (list, &mut self.roster_at, changed || moved),
-                    None => return changed,
+                self.roster = Some(list);
+                true
+            }
+            "dragon.assign.player.info" => {
+                if !ds_signups_open(message.time) {
+                    return changed;
+                }
+                match read_list(data, "users", participant, message.time) {
+                    Some(list) => {
+                        self.ds_signups = Some(list);
+                        true
+                    }
+                    None => changed,
                 }
             }
-            "dragon.assign.player.info" => (
-                desert_storm_participants(data),
-                &mut self.signups_at,
-                changed,
-            ),
-            "al.battle.rank.info" => return self.apply_vs(data, message.time) || changed,
-            _ => return changed,
-        };
-        if !list.players.is_empty() {
-            *stamp = Some(message.time);
+            "al.battle.rank.info" => self.apply_vs(data, message.time) || changed,
+            _ => changed,
         }
-        self.merge_list(list) || changed
     }
 
     /// The VS week the view holds data for.
@@ -111,8 +114,22 @@ impl View {
             .or(self.roster_alliance.as_deref())
     }
 
+    /// Our alliance's warzone: the `serverId` the member list gives its members, when every
+    /// member that has one has the same. `None` until the member list has arrived, or if they
+    /// differ.
+    pub fn warzone(&self) -> Option<i64> {
+        let mut ids = self
+            .roster
+            .as_ref()?
+            .entries
+            .iter()
+            .filter_map(|m| m.server_id);
+        let first = ids.next()?;
+        ids.all(|id| id == first).then_some(first)
+    }
+
     /// Drops what belonged to the old week, alliance or account. The only place the view's
-    /// data is cleared.
+    /// data is cleared, apart from sign-ups closing at the weekend.
     fn clear(&mut self, scope: Scope) {
         if let Scope::Account(uid) = scope {
             *self = View {
@@ -125,25 +142,18 @@ impl View {
             };
             return;
         }
-        self.vs_seen.clear();
         self.ds_battles.clear();
-        self.vs_at = None;
-        self.signups_at = None;
-        for player in self.players.values_mut() {
-            player.vs_scores = Default::default();
-            player.choose_time_list = None;
-            player.ds_group = None;
-        }
+        self.ds_signups = None;
+        self.vs_days = Default::default();
         if let Scope::Alliance = scope {
-            self.players.clear();
             self.roster_alliance = None;
-            self.roster_at = None;
+            self.roster = None;
         }
     }
 
     /// Tracks the logged-in account. A different uid means the user switched accounts: every
-    /// player, score and result belongs to the old account, so the view starts again. A
-    /// different alliance on the same account clears the old alliance's data.
+    /// list and result belongs to the old account, so the view starts again. A different
+    /// alliance on the same account clears the old alliance's data.
     fn note_account(&mut self, command: &str, data: &Value) -> bool {
         let mut changed = false;
         if let Some(uid) = own_uid(command, data) {
@@ -194,51 +204,24 @@ impl View {
         Some(moved)
     }
 
-    /// Merges a whole-alliance list (member list or participants). Players it no longer lists
-    /// are dropped, but only when every entry could be read: an unreadable entry might be one
-    /// of the players who would otherwise be removed.
-    fn merge_list(&mut self, list: AllianceList) -> bool {
-        let AllianceList {
-            players: updates,
-            complete,
-        } = list;
-        // An empty list means the message was not understood, not that the alliance is empty.
-        if updates.is_empty() {
-            return false;
-        }
-        if complete {
-            let listed: HashSet<&str> = updates.iter().map(|u| u.uid.as_str()).collect();
-            self.players.retain(|uid, _| listed.contains(uid.as_str()));
-        }
-        for update in updates {
-            let vs_seen = &self.vs_seen;
-            self.players
-                .entry(update.uid.clone())
-                .or_insert_with(|| Player {
-                    uid: update.uid.clone(),
-                    vs_scores: vs_seen.get(&update.uid).copied().unwrap_or_default(),
-                    ..Player::default()
-                })
-                .merge(update);
-        }
-        true
-    }
-
     /// Clears everything that belongs to one VS week once `time` falls in a later week: VS
-    /// scores, Desert Storm results, sign-up time slots and team assignments. The roster (rank,
-    /// power, kills) stays. Called for every message and, from the window's clock, every second,
-    /// so the reset happens even while the game is closed.
+    /// rankings and Desert Storm sign-ups and battles. The member list stays. Also clears the
+    /// sign-ups from Saturday on. Called for every message and, from the window's clock, every
+    /// second, so both happen even while the game is closed. Returns whether anything changed.
     pub fn roll_vs_week(&mut self, time: Duration) -> bool {
         let (week, _) = vs_day(time);
-        if self.vs_week.is_some_and(|w| w >= week) {
+        // A time from an earlier week (a message captured before the reset but handled after
+        // it) says nothing about this week, so it changes nothing.
+        if self.vs_week.is_some_and(|w| week < w) {
             return false;
         }
-        let previous = self.vs_week.replace(week);
-        if previous.is_none() {
-            return false;
+        let new_week = self.vs_week.is_some_and(|w| week > w);
+        if new_week {
+            self.clear(Scope::Week);
         }
-        self.clear(Scope::Week);
-        true
+        self.vs_week = Some(week);
+        let closed = !ds_signups_open(time) && self.ds_signups.take().is_some();
+        new_week || closed
     }
 
     /// Replaces the Desert Storm battles with those from the view's VS week, after running the
@@ -255,16 +238,15 @@ impl View {
         self.ds_battles.len()
     }
 
-    /// This week's battles fought by our alliance, with the team each was fought by. The mail
-    /// database holds every account's mail, so it can hold other alliances' battles too; a
-    /// battle counts only when it belongs to our alliance. Until our alliance is known, none
-    /// do: a player's past battle for another alliance must not pass as ours.
-    pub fn ds_battles(&self) -> impl Iterator<Item = (&DsBattle, Option<i64>)> {
+    /// This week's battles fought by our alliance. The mail database holds every account's
+    /// mail, so it can hold other alliances' battles too; a battle counts only when it belongs
+    /// to our alliance. Until our alliance is known, none do: a player's past battle for
+    /// another alliance must not pass as ours.
+    pub fn ds_battles(&self) -> impl Iterator<Item = &DsBattle> {
         let alliance = self.alliance_id();
         self.ds_battles
             .iter()
             .filter(move |b| alliance == Some(b.alliance_id.as_str()))
-            .map(|b| (b, self.battle_team(b)))
     }
 
     /// Battles from the last mail load that can't be attributed yet because our alliance is
@@ -277,60 +259,8 @@ impl View {
         }
     }
 
-    /// The team whose assigned players make up most of a battle's list.
-    fn battle_team(&self, battle: &DsBattle) -> Option<i64> {
-        let mut counts: HashMap<i64, usize> = HashMap::new();
-        for (uid, _) in &battle.players {
-            if let Some(group) = self
-                .players
-                .get(uid)
-                .and_then(|p| p.ds_group)
-                .filter(|&g| g > 0)
-            {
-                *counts.entry(group).or_default() += 1;
-            }
-        }
-        counts
-            .into_iter()
-            .max_by_key(|&(group, n)| (n, std::cmp::Reverse(group)))
-            .map(|(g, _)| g)
-    }
-
-    /// The player's Desert Storm result this week: from the battle they are listed in, or else
-    /// as absent from their assigned team's battle. `None` when there's no result, or when a
-    /// battle's player list couldn't be fully read and absence can't be told.
-    pub fn ds_result(&self, player: &Player) -> Option<DsResult> {
-        let battles: Vec<(&DsBattle, Option<i64>)> = self.ds_battles().collect();
-        for &(battle, team) in &battles {
-            if let Some(&(_, score)) = battle.players.iter().find(|(uid, _)| *uid == player.uid) {
-                return Some(DsResult {
-                    team,
-                    attended: score > 0,
-                    score: Some(score),
-                    won: battle.won,
-                });
-            }
-        }
-        // Absence is only concluded from complete lists: an entry that couldn't be read may be
-        // this player, in either battle.
-        if !battles.iter().all(|(battle, _)| battle.players_complete) {
-            return None;
-        }
-        let assigned = player.ds_group.filter(|&g| g > 0)?;
-        battles
-            .iter()
-            .find(|(_, team)| *team == Some(assigned))
-            .map(|&(battle, team)| DsResult {
-                team,
-                attended: false,
-                score: None,
-                won: battle.won,
-            })
-    }
-
-    /// `al.battle.rank.info`: one day's VS ranking for both alliances. Scores are kept by uid
-    /// and shown only on players in the view, which leaves out the opponent. The current day is
-    /// skipped because its scores keep changing until the reset.
+    /// `al.battle.rank.info`: one day's VS ranking for both alliances, kept whole. The current
+    /// day is skipped because its scores keep changing until the reset.
     fn apply_vs(&mut self, data: &Value, time: Duration) -> bool {
         let Some(day) = int(data, "day") else {
             return false;
@@ -339,55 +269,13 @@ impl View {
         if !(1..=6).contains(&day) || day >= today {
             return false;
         }
-        let slot = (day - 1) as usize;
-        let mut recorded = false;
-        let mut changed = false;
-        for (entry, uid) in entries(data, "rankInfo") {
-            let Some(score) = int(entry, "score") else {
-                continue;
-            };
-            if let Some(player) = self.players.get_mut(&uid) {
-                changed |= player.vs_scores[slot] != Some(score);
-                player.vs_scores[slot] = Some(score);
+        match read_list(data, "rankInfo", vs_score, time) {
+            Some(list) => {
+                self.vs_days[(day - 1) as usize] = Some(list);
+                true
             }
-            let seen = &mut self.vs_seen.entry(uid).or_default()[slot];
-            changed |= *seen != Some(score);
-            *seen = Some(score);
-            recorded = true;
+            None => false,
         }
-        // Stamped whenever a ranking was read, even before the roster has arrived to show it.
-        if recorded {
-            self.vs_at = Some(time);
-        }
-        changed
-    }
-
-    /// Days (0 = Monday) for which any player in the view has a VS score.
-    pub fn vs_days_loaded(&self) -> [bool; 6] {
-        let mut days = [false; 6];
-        for player in self.players.values() {
-            for (day, score) in player.vs_scores.iter().enumerate() {
-                days[day] |= score.is_some();
-            }
-        }
-        days
-    }
-
-    pub fn players(&self) -> impl Iterator<Item = &Player> {
-        self.players.values()
-    }
-
-    pub fn get(&self, uid: &str) -> Option<&Player> {
-        self.players.get(uid)
-    }
-
-    /// A JSON array of all players, one per line.
-    pub fn to_json(&self) -> String {
-        let rows: Vec<String> = self
-            .players()
-            .map(|p| p.to_json(self.ds_result(p)))
-            .collect();
-        format!("[\n{}\n]", rows.join(",\n"))
     }
 }
 
@@ -417,55 +305,58 @@ fn int_list(entry: &Value, key: &str) -> Option<Vec<i64>> {
     }
 }
 
-/// A whole-alliance list from one message.
-struct AllianceList {
-    players: Vec<Player>,
-    /// Every entry had a readable uid.
-    complete: bool,
-}
-
-/// Reads the array at `key` with `player`, noting whether any entry was unreadable.
-fn alliance_list(
+/// The array at `key` read with `entry`, as a panel list arrived at `time`. `None` when no
+/// entry could be read: the message was not understood, which says nothing about the panel.
+fn read_list<T>(
     data: &Value,
     key: &str,
-    player: impl Fn(&Value, String) -> Player,
-) -> AllianceList {
+    entry: impl Fn(&Value, String) -> T,
+    time: Duration,
+) -> Option<Panel<T>> {
     let total = data
         .get(key)
         .and_then(Value::as_array)
         .map_or(0, <[Value]>::len);
-    let players: Vec<Player> = entries(data, key)
-        .map(|(entry, uid)| player(entry, uid))
-        .collect();
-    AllianceList {
-        complete: players.len() == total,
-        players,
+    let entries: Vec<T> = entries(data, key).map(|(e, uid)| entry(e, uid)).collect();
+    if entries.is_empty() {
+        return None;
     }
+    Some(Panel {
+        time,
+        complete: entries.len() == total,
+        entries,
+    })
 }
 
-/// `al.rank`: the alliance member list.
-fn alliance_members(data: &Value) -> AllianceList {
-    alliance_list(data, "list", |m, uid| Player {
+/// A row of `al.rank`, the alliance member list.
+fn member(m: &Value, uid: String) -> Member {
+    Member {
         uid,
         name: string(m, "name"),
         rank: int(m, "rank"),
         power: int(m, "power"),
         army_kill: int(m, "armyKill"),
-        ..Player::default()
-    })
+        server_id: int(m, "serverId").or_else(|| string(m, "serverId")?.parse().ok()),
+    }
 }
 
-/// `dragon.assign.player.info`: the Desert Storm participants panel.
-fn desert_storm_participants(data: &Value) -> AllianceList {
-    alliance_list(data, "users", |u, uid| Player {
+/// A row of `dragon.assign.player.info`, the Desert Storm participants panel.
+fn participant(u: &Value, uid: String) -> Participant {
+    Participant {
         uid,
-        name: string(u, "name"),
-        power: int(u, "power"),
         hero_power: int(u, "heroPower"),
         choose_time_list: int_list(u, "chooseTimeList"),
-        ds_group: int(u, "group"),
-        ..Player::default()
-    })
+        group: int(u, "group"),
+    }
+}
+
+/// A row of `al.battle.rank.info`'s `rankInfo`.
+fn vs_score(r: &Value, uid: String) -> VsScore {
+    VsScore {
+        uid,
+        score: int(r, "score"),
+        alliance_id: string(r, "aid"),
+    }
 }
 
 #[cfg(test)]
@@ -485,7 +376,15 @@ mod tests {
         Message::command_for_test(command, data, secs)
     }
 
-    fn member(uid: &str, name: &str, rank: i32, power: i64) -> Value {
+    /// Friday 2026-10-02 20:00 UTC.
+    const FRIDAY: u64 = 1_790_971_200;
+    const DAY: u64 = 86_400;
+    /// Saturday 2026-10-03 02:00 UTC, when sign-ups close.
+    const SATURDAY: u64 = FRIDAY - 18 * 3600 + DAY;
+    /// Monday 2026-10-05 02:00 UTC, the weekly reset.
+    const MONDAY: u64 = SATURDAY + 2 * DAY;
+
+    fn member_entry(uid: &str, name: &str, rank: i32, power: i64) -> Value {
         obj(vec![
             ("uid", Value::Str(uid.into())),
             ("name", Value::Str(name.into())),
@@ -495,93 +394,46 @@ mod tests {
         ])
     }
 
-    fn participant(uid: &str, name: &str, hero: i64, power: i64) -> Value {
+    fn participant_entry(uid: &str, group: i32) -> Value {
         obj(vec![
             ("uid", Value::Str(uid.into())),
-            ("name", Value::Str(name.into())),
-            ("heroPower", Value::Long(hero)),
-            ("power", Value::Long(power)),
+            ("name", Value::Str("Ann".into())),
+            ("heroPower", Value::Long(60)),
+            ("power", Value::Long(110)),
             (
                 "chooseTimeList",
                 Value::Array(vec![Value::Int(2), Value::Int(1)]),
             ),
+            ("group", Value::Int(group)),
         ])
     }
 
-    #[test]
-    fn merges_fields_from_both_panels() {
-        let mut view = View::default();
-        let members = obj(vec![(
-            "list",
-            Value::Array(vec![member("1", "Ann", 4, 100)]),
-        )]);
-        let users = obj(vec![(
-            "users",
-            Value::Array(vec![participant("1", "Ann", 60, 110)]),
-        )]);
-        assert!(view.apply(&message("al.rank", members, 1)));
-        assert!(view.apply(&message("dragon.assign.player.info", users, 2)));
-
-        let p = view.get("1").unwrap();
-        assert_eq!(p.rank, Some(4));
-        assert_eq!(p.army_kill, Some(7));
-        assert_eq!(p.hero_power, Some(60));
-        assert_eq!(p.power, Some(110), "newest message wins");
-        assert_eq!(p.choose_time_list, Some(vec![2, 1]));
-        assert_eq!(view.roster_at, Some(Duration::from_secs(1)));
-        assert_eq!(view.signups_at, Some(Duration::from_secs(2)));
+    fn participants(entries: Vec<Value>) -> Value {
+        obj(vec![("users", Value::Array(entries))])
     }
 
-    #[test]
-    fn drops_players_missing_from_newer_list() {
-        let mut view = View::default();
-        let both = obj(vec![(
-            "list",
-            Value::Array(vec![member("1", "Ann", 4, 100), member("2", "Bob", 3, 90)]),
-        )]);
-        let one = obj(vec![(
-            "users",
-            Value::Array(vec![participant("1", "Ann", 60, 110)]),
-        )]);
-        view.apply(&message("al.rank", both, 1));
-        view.apply(&message("dragon.assign.player.info", one, 2));
-        let uids: Vec<&str> = view.players().map(|p| p.uid.as_str()).collect();
-        assert_eq!(uids, ["1"]);
-        assert_eq!(
-            view.get("1").unwrap().rank,
-            Some(4),
-            "kept players keep their fields"
-        );
-    }
-
-    #[test]
-    fn empty_list_changes_nothing() {
-        let mut view = View::default();
-        let members = obj(vec![(
-            "list",
-            Value::Array(vec![member("1", "Ann", 4, 100)]),
-        )]);
-        view.apply(&message("al.rank", members, 1));
-        assert!(!view.apply(&message("al.rank", obj(vec![]), 2)));
-        assert_eq!(view.players().count(), 1);
-        assert_eq!(
-            view.roster_at,
-            Some(Duration::from_secs(1)),
-            "an empty list is not an update"
-        );
-    }
-
-    #[test]
-    fn ignores_other_commands() {
-        let mut view = View::default();
-        assert!(!view.apply(&message("push.al.sign", obj(vec![]), 1)));
-        assert_eq!(view.players().count(), 0);
-    }
-
-    fn assigned(uid: &str, group: i64) -> Value {
+    /// An `al.rank` member list of `alliance` listing `members`.
+    fn roster(alliance: &str, members: Vec<Value>) -> Value {
         obj(vec![
-            ("uid", Value::Str(uid.into())),
-            ("group", Value::Int(group as i32)),
+            ("allianceId", Value::Str(alliance.into())),
+            ("list", Value::Array(members)),
+        ])
+    }
+
+    fn ranking(day: i32, scores: &[(&str, i32, &str)]) -> Value {
+        let list = scores
+            .iter()
+            .map(|(uid, score, aid)| {
+                obj(vec![
+                    ("uid", Value::Str((*uid).into())),
+                    ("score", Value::Int(*score)),
+                    ("aid", Value::Str((*aid).into())),
+                ])
+            })
+            .collect();
+        obj(vec![
+            ("day", Value::Int(day)),
+            ("rankInfo", Value::Array(list)),
         ])
     }
 
@@ -599,208 +451,300 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ds_results_from_this_weeks_battles() {
-        let mut view = View::default();
-        let members = ["a", "b", "c", "d", "e"].map(|uid| member(uid, uid, 1, 1));
-        view.apply(&message(
-            "al.rank",
-            roster("ours", members.to_vec()),
-            FRIDAY,
-        ));
-        let users = vec![
-            assigned("a", 1),
-            assigned("b", 1),
-            assigned("c", 2),
-            assigned("d", 2),
-            assigned("e", 0),
-        ];
-        view.apply(&message(
-            "dragon.assign.player.info",
-            obj(vec![("users", Value::Array(users))]),
-            FRIDAY,
-        ));
-        let morning = FRIDAY - 9 * 3600;
-        let last_week = FRIDAY - 7 * DAY;
-        let mut theirs = battle(FRIDAY, true, &[("x", 5)]);
-        theirs.alliance_id = "theirs".into();
-        let kept = view.set_ds_battles(
-            vec![
-                battle(morning, true, &[("c", 50), ("d", 0)]),
-                battle(FRIDAY, false, &[("a", 30)]),
-                battle(last_week, true, &[("a", 99)]),
-                theirs,
-            ],
-            Duration::from_secs(FRIDAY + 2 * DAY),
-        );
-        assert_eq!(kept, 3, "last week's battle is dropped");
-        assert_eq!(
-            view.ds_battles().count(),
-            2,
-            "another alliance's battle is not shown"
-        );
-
-        let result = |uid: &str| view.ds_result(view.get(uid).unwrap());
-        assert_eq!(
-            result("a"),
-            Some(DsResult {
-                team: Some(1),
-                attended: true,
-                score: Some(30),
-                won: false
-            })
-        );
-        assert_eq!(
-            result("b"),
-            Some(DsResult {
-                team: Some(1),
-                attended: false,
-                score: None,
-                won: false
-            })
-        );
-        assert_eq!(
-            result("c"),
-            Some(DsResult {
-                team: Some(2),
-                attended: true,
-                score: Some(50),
-                won: true
-            })
-        );
-        assert_eq!(
-            result("d"),
-            Some(DsResult {
-                team: Some(2),
-                attended: false,
-                score: Some(0),
-                won: true
-            })
-        );
-        assert_eq!(result("e"), None);
-    }
-
-    /// Friday 2026-10-02 20:00 UTC.
-    const FRIDAY: u64 = 1_790_971_200;
-    const DAY: u64 = 86_400;
-
-    fn ranking(day: i32, scores: &[(&str, i32)]) -> Value {
-        let list = scores
-            .iter()
-            .map(|(uid, score)| {
-                obj(vec![
-                    ("uid", Value::Str((*uid).into())),
-                    ("score", Value::Int(*score)),
-                ])
-            })
-            .collect();
-        obj(vec![
-            ("day", Value::Int(day)),
-            ("rankInfo", Value::Array(list)),
-        ])
-    }
-
-    /// An `al.rank` member list of `alliance` listing `members`.
-    fn roster(alliance: &str, members: Vec<Value>) -> Value {
-        obj(vec![
-            ("allianceId", Value::Str(alliance.into())),
-            ("list", Value::Array(members)),
-        ])
-    }
-
     /// A view holding alliance "ours" with one member, Ann (uid 1).
     fn view_with_ann() -> View {
         let mut view = View::default();
-        let members = roster("ours", vec![member("1", "Ann", 4, 100)]);
+        let members = roster("ours", vec![member_entry("1", "Ann", 4, 100)]);
         view.apply(&message("al.rank", members, FRIDAY));
         view
     }
 
+    fn uids<T>(panel: &Option<Panel<T>>, uid: impl Fn(&T) -> &str) -> Vec<&str> {
+        panel
+            .as_ref()
+            .map(|p| p.entries.iter().map(uid).collect())
+            .unwrap_or_default()
+    }
+
+    fn roster_uids(view: &View) -> Vec<&str> {
+        uids(&view.roster, |m| m.uid.as_str())
+    }
+
     #[test]
-    fn vs_scores_for_completed_days_of_known_players() {
+    fn panels_are_kept_apart_as_sent() {
         let mut view = view_with_ann();
-        let thursday = ranking(4, &[("1", 300), ("opponent", 999)]);
+        let users = participants(vec![participant_entry("1", 2)]);
+        assert!(view.apply(&message("dragon.assign.player.info", users, FRIDAY + 1)));
+
+        let roster = view.roster.as_ref().unwrap();
+        assert_eq!(roster.time, Duration::from_secs(FRIDAY));
+        assert!(roster.complete);
+        assert_eq!(
+            roster.entries,
+            [Member {
+                uid: "1".into(),
+                name: Some("Ann".into()),
+                rank: Some(4),
+                power: Some(100),
+                army_kill: Some(7),
+                server_id: None,
+            }]
+        );
+        let signups = view.ds_signups.as_ref().unwrap();
+        assert_eq!(signups.time, Duration::from_secs(FRIDAY + 1));
+        assert_eq!(
+            signups.entries,
+            [Participant {
+                uid: "1".into(),
+                hero_power: Some(60),
+                choose_time_list: Some(vec![2, 1]),
+                group: Some(2),
+            }]
+        );
+        assert_eq!(
+            view.roster.as_ref().unwrap().entries[0].power,
+            Some(100),
+            "the member list's power is the one kept"
+        );
+    }
+
+    #[test]
+    fn the_newest_list_replaces_the_last() {
+        let mut view = View::default();
+        let both = roster(
+            "ours",
+            vec![
+                member_entry("1", "Ann", 4, 100),
+                member_entry("2", "Bob", 3, 90),
+            ],
+        );
+        view.apply(&message("al.rank", both, FRIDAY));
+        let one = roster("ours", vec![member_entry("1", "Ann", 5, 100)]);
+        view.apply(&message("al.rank", one, FRIDAY + 1));
+        assert_eq!(roster_uids(&view), ["1"]);
+        assert_eq!(view.roster.as_ref().unwrap().entries[0].rank, Some(5));
+    }
+
+    /// A member of server `server`, sent as `value`.
+    fn on_server(uid: &str, value: Value) -> Value {
+        obj(vec![("uid", Value::Str(uid.into())), ("serverId", value)])
+    }
+
+    #[test]
+    fn warzone_from_the_members_server() {
+        let mut view = View::default();
+        assert_eq!(view.warzone(), None);
+        // Sent as a number or as text; a member without one doesn't count.
+        let members = vec![
+            on_server("1", Value::Int(901)),
+            on_server("2", Value::Str("901".into())),
+            member_entry("3", "Cat", 1, 1),
+        ];
+        view.apply(&message("al.rank", roster("ours", members), FRIDAY));
+        assert_eq!(view.warzone(), Some(901));
+
+        // Members on different servers give no single warzone.
+        let mixed = vec![
+            on_server("1", Value::Int(901)),
+            on_server("2", Value::Int(902)),
+        ];
+        view.apply(&message("al.rank", roster("ours", mixed), FRIDAY + 1));
+        assert_eq!(view.warzone(), None);
+    }
+
+    #[test]
+    fn an_unreadable_entry_marks_the_list_incomplete() {
+        let mut view = View::default();
+        let unreadable = obj(vec![("name", Value::Str("Bob".into()))]);
+        let partial = roster("ours", vec![member_entry("1", "Ann", 5, 100), unreadable]);
+        view.apply(&message("al.rank", partial, FRIDAY));
+        let roster = view.roster.as_ref().unwrap();
+        assert_eq!(roster.entries.len(), 1);
+        assert!(!roster.complete);
+    }
+
+    #[test]
+    fn empty_list_changes_nothing() {
+        let mut view = view_with_ann();
+        assert!(!view.apply(&message("al.rank", obj(vec![]), FRIDAY + 1)));
+        assert!(!view.apply(&message(
+            "dragon.assign.player.info",
+            participants(vec![]),
+            FRIDAY + 1
+        )));
+        assert_eq!(
+            view.roster.as_ref().unwrap().time,
+            Duration::from_secs(FRIDAY),
+            "an empty list is not an update"
+        );
+        assert_eq!(view.ds_signups, None);
+    }
+
+    #[test]
+    fn ignores_other_commands() {
+        let mut view = View::default();
+        assert!(!view.apply(&message("push.al.sign", obj(vec![]), FRIDAY)));
+        assert_eq!(view.roster, None);
+    }
+
+    #[test]
+    fn ds_signups_close_from_saturday_to_the_reset() {
+        let mut view = view_with_ann();
+        let users = || participants(vec![participant_entry("1", 1)]);
+        view.apply(&message("dragon.assign.player.info", users(), FRIDAY));
+        assert!(view.ds_signups.is_some());
+
+        // Saturday 02:00 UTC passes on the window's clock: Friday's sign-ups go.
+        assert!(!view.roll_vs_week(Duration::from_secs(SATURDAY - 1)));
+        assert!(view.roll_vs_week(Duration::from_secs(SATURDAY)));
+        assert_eq!(view.ds_signups, None);
+        // The weekend's lists are ignored.
+        assert!(!view.apply(&message(
+            "dragon.assign.player.info",
+            users(),
+            SATURDAY + 60
+        )));
+        assert_eq!(view.ds_signups, None);
+        assert!(view.roster.is_some(), "the member list stays");
+
+        // After the Monday reset, sign-ups are read again.
+        assert!(view.apply(&message("dragon.assign.player.info", users(), MONDAY)));
+        assert!(view.ds_signups.is_some());
+    }
+
+    #[test]
+    fn a_delayed_weekend_message_keeps_the_new_weeks_sign_ups() {
+        let mut view = view_with_ann();
+        let users = participants(vec![participant_entry("1", 1)]);
+        assert!(view.apply(&message("dragon.assign.player.info", users, MONDAY + 60)));
+        // A message captured on Sunday is handled after Monday's sign-ups.
+        let sunday = MONDAY - 3600;
+        assert!(!view.apply(&message("push.al.sign", obj(vec![]), sunday)));
+        assert!(!view.roll_vs_week(Duration::from_secs(sunday)));
+        assert_eq!(
+            view.ds_signups.as_ref().map(|p| p.time),
+            Some(Duration::from_secs(MONDAY + 60))
+        );
+    }
+
+    #[test]
+    fn vs_rankings_for_completed_days() {
+        let mut view = view_with_ann();
+        let thursday = ranking(4, &[("1", 300, "ours"), ("opponent", 999, "theirs")]);
         assert!(view.apply(&message("al.battle.rank.info", thursday, FRIDAY)));
-        let today = ranking(5, &[("1", 50)]);
+        let today = ranking(5, &[("1", 50, "ours")]);
         assert!(
             !view.apply(&message("al.battle.rank.info", today, FRIDAY)),
             "current day skipped"
         );
+        let empty = ranking(3, &[]);
+        assert!(!view.apply(&message("al.battle.rank.info", empty, FRIDAY)));
 
+        let loaded: Vec<bool> = view.vs_days.iter().map(Option::is_some).collect();
+        assert_eq!(loaded, [false, false, false, true, false, false]);
+        let thursday = view.vs_days[3].as_ref().unwrap();
         assert_eq!(
-            view.get("1").unwrap().vs_scores,
-            [None, None, None, Some(300), None, None]
+            thursday.entries,
+            [
+                VsScore {
+                    uid: "1".into(),
+                    score: Some(300),
+                    alliance_id: Some("ours".into()),
+                },
+                VsScore {
+                    uid: "opponent".into(),
+                    score: Some(999),
+                    alliance_id: Some("theirs".into()),
+                },
+            ],
+            "both alliances, as the ranking lists them; the payload keeps ours"
         );
-        assert!(view.get("opponent").is_none());
     }
 
     #[test]
-    fn vs_scores_clear_in_a_new_week() {
+    fn weekly_reset_clears_the_weeks_data() {
         let mut view = view_with_ann();
-        view.apply(&message(
-            "al.battle.rank.info",
-            ranking(4, &[("1", 300)]),
-            FRIDAY,
-        ));
-        let next_tuesday = FRIDAY + 4 * DAY;
-        assert!(view.apply(&message("push.al.sign", obj(vec![]), next_tuesday)));
-        assert_eq!(view.get("1").unwrap().vs_scores, [None; 6]);
-        view.apply(&message(
-            "al.battle.rank.info",
-            ranking(1, &[("1", 7)]),
-            next_tuesday,
-        ));
-        assert_eq!(view.get("1").unwrap().vs_scores[0], Some(7));
-    }
-
-    #[test]
-    fn weekly_reset_clears_all_desert_storm_data() {
-        let mut view = view_with_ann();
-        let users = vec![obj(vec![
-            ("uid", Value::Str("1".into())),
-            ("group", Value::Int(1)),
-            ("chooseTimeList", Value::Array(vec![Value::Int(2)])),
-        ])];
         view.apply(&message(
             "dragon.assign.player.info",
-            obj(vec![("users", Value::Array(users))]),
+            participants(vec![participant_entry("1", 1)]),
+            FRIDAY,
+        ));
+        view.apply(&message(
+            "al.battle.rank.info",
+            ranking(4, &[("1", 300, "ours")]),
             FRIDAY,
         ));
         let battles = || vec![battle(FRIDAY - 9 * 3600, true, &[("1", 50)])];
-        view.set_ds_battles(battles(), Duration::from_secs(FRIDAY));
-        assert!(view.ds_result(view.get("1").unwrap()).is_some());
-        assert!(view.signups_at.is_some());
+        assert_eq!(
+            view.set_ds_battles(battles(), Duration::from_secs(FRIDAY)),
+            1
+        );
 
         // Monday 02:00 UTC passes on the window's clock, with no game messages.
-        let monday = FRIDAY - 20 * 3600 + 3 * DAY + 7200;
-        assert!(!view.roll_vs_week(Duration::from_secs(monday - 1)));
-        assert!(view.roll_vs_week(Duration::from_secs(monday)));
-        let p = view.get("1").unwrap();
-        assert_eq!((p.choose_time_list.clone(), p.ds_group), (None, None));
-        assert_eq!(view.ds_result(p), None);
-        assert_eq!(view.signups_at, None);
-        assert_eq!(p.rank, Some(4), "the roster stays");
+        view.roll_vs_week(Duration::from_secs(MONDAY - 1));
+        assert!(view.ds_battles().count() == 1 && view.vs_days[3].is_some());
+        assert!(view.roll_vs_week(Duration::from_secs(MONDAY)));
+        assert_eq!(view.ds_battles().count(), 0);
+        assert_eq!(view.ds_signups, None);
+        assert!(view.vs_days.iter().all(Option::is_none));
+        assert_eq!(roster_uids(&view), ["1"], "the member list stays");
 
         // Loading mail in the new week finds only last week's battles: nothing is kept.
         assert_eq!(
-            view.set_ds_battles(battles(), Duration::from_secs(monday + 60)),
+            view.set_ds_battles(battles(), Duration::from_secs(MONDAY + 60)),
             0
         );
     }
 
     #[test]
-    fn vs_ranking_before_member_list_still_counts() {
-        let mut view = View::default();
-        view.apply(&message(
+    fn messages_from_before_the_reset_are_ignored() {
+        let mut view = view_with_ann();
+        // The window's clock runs the reset first; then a ranking captured on Sunday is handled.
+        view.roll_vs_week(Duration::from_secs(MONDAY));
+        assert!(!view.apply(&message(
             "al.battle.rank.info",
-            ranking(3, &[("1", 30), ("opponent", 9)]),
-            FRIDAY,
-        ));
-        assert_eq!(view.players().count(), 0);
-        let members = roster("ours", vec![member("1", "Ann", 4, 100)]);
+            ranking(4, &[("1", 300, "ours")]),
+            MONDAY - 3600
+        )));
+        assert!(view.vs_days.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn ds_battles_of_this_week_and_our_alliance() {
+        let mut view = view_with_ann();
+        let mut theirs = battle(FRIDAY, true, &[("x", 5)]);
+        theirs.alliance_id = "theirs".into();
+        let kept = view.set_ds_battles(
+            vec![
+                battle(FRIDAY - 9 * 3600, true, &[("1", 50)]),
+                battle(FRIDAY, false, &[("2", 30)]),
+                battle(FRIDAY - 7 * DAY, true, &[("1", 99)]),
+                theirs,
+            ],
+            Duration::from_secs(SATURDAY + DAY),
+        );
+        assert_eq!(kept, 3, "last week's battle is dropped");
+        let won: Vec<bool> = view.ds_battles().map(|b| b.won).collect();
+        assert_eq!(won, [true, false], "another alliance's battle is left out");
+    }
+
+    #[test]
+    fn battles_count_only_once_our_alliance_is_known() {
+        let mut view = View::default();
+        // Player 1 fought in another alliance's battle (say, before moving to ours).
+        let mut other = battle(FRIDAY, true, &[("1", 50)]);
+        other.alliance_id = "other alliance".into();
+        let ours = battle(FRIDAY, false, &[("1", 30)]);
+        view.set_ds_battles(vec![other, ours], Duration::from_secs(FRIDAY));
+        assert_eq!(view.ds_battles().count(), 0, "alliance unknown: none count");
+        assert_eq!(view.unattributed_battles(), 2);
+
+        // The member list names the alliance.
+        let members = roster("ours", vec![member_entry("1", "Ann", 4, 100)]);
         view.apply(&message("al.rank", members, FRIDAY));
-        assert_eq!(view.get("1").unwrap().vs_scores[2], Some(30));
-        assert!(view.get("opponent").is_none());
+        let battles: Vec<_> = view.ds_battles().map(|b| b.alliance_id.as_str()).collect();
+        assert_eq!(battles, ["ours"]);
+        assert_eq!(view.unattributed_battles(), 0);
     }
 
     fn gold_tree(uid: &str) -> Value {
@@ -858,8 +802,8 @@ mod tests {
         assert_eq!(account.name.as_deref(), Some("Player One"));
         assert_eq!(account.alliance_abbr.as_deref(), Some("EXA"));
         assert_eq!(
-            view.players().count(),
-            1,
+            roster_uids(&view),
+            ["1"],
             "identifying the first account keeps the data"
         );
     }
@@ -870,7 +814,7 @@ mod tests {
         view.apply(&message("gold.tree.act.view", gold_tree("me"), FRIDAY));
         view.apply(&message(
             "al.battle.rank.info",
-            ranking(4, &[("1", 300)]),
+            ranking(4, &[("1", 300, "ours")]),
             FRIDAY,
         ));
         view.set_ds_battles(
@@ -883,139 +827,13 @@ mod tests {
             FRIDAY
         )));
         assert_eq!(view.account().map(|a| a.uid.as_str()), Some("alt"));
-        assert_eq!(view.players().count(), 0);
+        assert_eq!(view.roster, None);
+        assert!(view.vs_days.iter().all(Option::is_none));
         assert_eq!(view.ds_battles().count(), 0);
         assert_eq!(
             view.alliance_id(),
             None,
             "the old roster's alliance is gone"
-        );
-        // A ranking seen before the switch must not come back with the new account's members.
-        let members = roster("ours", vec![member("1", "Ann", 4, 100)]);
-        view.apply(&message("al.rank", members, FRIDAY));
-        assert_eq!(view.get("1").unwrap().vs_scores, [None; 6]);
-    }
-
-    #[test]
-    fn vs_ranking_does_not_drop_players() {
-        let mut view = view_with_ann();
-        view.apply(&message(
-            "al.battle.rank.info",
-            ranking(4, &[("other", 1)]),
-            FRIDAY,
-        ));
-        assert!(view.get("1").is_some());
-    }
-
-    #[test]
-    fn vs_ranking_before_the_roster_is_stamped_as_loaded() {
-        let mut view = View::default();
-        view.apply(&message(
-            "al.battle.rank.info",
-            ranking(3, &[("1", 30)]),
-            FRIDAY,
-        ));
-        assert_eq!(view.vs_at, Some(Duration::from_secs(FRIDAY)));
-    }
-
-    #[test]
-    fn messages_from_before_the_reset_are_ignored() {
-        let mut view = view_with_ann();
-        let monday = FRIDAY - 20 * 3600 + 3 * DAY + 7200;
-        // The window's clock runs the reset first; then a ranking captured on Sunday is handled.
-        view.roll_vs_week(Duration::from_secs(monday));
-        let sunday = monday - 3600;
-        assert!(!view.apply(&message(
-            "al.battle.rank.info",
-            ranking(4, &[("1", 300)]),
-            sunday
-        )));
-        assert_eq!(view.get("1").unwrap().vs_scores, [None; 6]);
-        assert_eq!(view.vs_at, None);
-    }
-
-    #[test]
-    fn a_list_with_an_unreadable_entry_removes_nobody() {
-        let mut view = View::default();
-        let both = obj(vec![(
-            "list",
-            Value::Array(vec![member("1", "Ann", 4, 100), member("2", "Bob", 3, 90)]),
-        )]);
-        view.apply(&message("al.rank", both, FRIDAY));
-        // Bob's entry arrives without a readable uid: he must not be treated as having left.
-        let unreadable = obj(vec![("name", Value::Str("Bob".into()))]);
-        let partial = obj(vec![(
-            "list",
-            Value::Array(vec![member("1", "Ann", 5, 100), unreadable]),
-        )]);
-        view.apply(&message("al.rank", partial, FRIDAY));
-        assert!(view.get("2").is_some());
-        assert_eq!(
-            view.get("1").unwrap().rank,
-            Some(5),
-            "readable entries still update"
-        );
-    }
-
-    #[test]
-    fn nobody_is_judged_absent_from_a_partly_read_battle() {
-        let mut view = View::default();
-        let members = ["a", "b"].map(|uid| member(uid, uid, 1, 1));
-        view.apply(&message(
-            "al.rank",
-            roster("ours", members.to_vec()),
-            FRIDAY,
-        ));
-        view.apply(&message(
-            "dragon.assign.player.info",
-            obj(vec![(
-                "users",
-                Value::Array(vec![assigned("a", 1), assigned("b", 1)]),
-            )]),
-            FRIDAY,
-        ));
-        // Player b's entry in the mail couldn't be read.
-        let mut partly = battle(FRIDAY, true, &[("a", 30)]);
-        partly.players_complete = false;
-        view.set_ds_battles(vec![partly], Duration::from_secs(FRIDAY));
-        assert_eq!(
-            view.ds_result(view.get("a").unwrap()).map(|r| r.score),
-            Some(Some(30)),
-            "listed players still have their result"
-        );
-        assert_eq!(view.ds_result(view.get("b").unwrap()), None);
-    }
-
-    #[test]
-    fn battles_count_only_once_our_alliance_is_known() {
-        // Only the participants panel so far: it doesn't say which alliance this is.
-        let mut view = View::default();
-        view.apply(&message(
-            "dragon.assign.player.info",
-            obj(vec![("users", Value::Array(vec![assigned("1", 1)]))]),
-            FRIDAY,
-        ));
-        // Player 1 fought in another alliance's battle (say, before moving to ours).
-        let mut other = battle(FRIDAY, true, &[("1", 50)]);
-        other.alliance_id = "other alliance".into();
-        let ours = battle(FRIDAY, false, &[("1", 30)]);
-        view.set_ds_battles(vec![other, ours], Duration::from_secs(FRIDAY));
-        assert_eq!(view.ds_battles().count(), 0, "alliance unknown: none count");
-        assert_eq!(view.unattributed_battles(), 2);
-        assert_eq!(view.ds_result(view.get("1").unwrap()), None);
-
-        // The member list names the alliance.
-        let members = roster("ours", vec![member("1", "Ann", 4, 100)]);
-        view.apply(&message("al.rank", members, FRIDAY));
-        let battles: Vec<_> = view
-            .ds_battles()
-            .map(|(b, _)| b.alliance_id.as_str())
-            .collect();
-        assert_eq!(battles, ["ours"]);
-        assert_eq!(view.unattributed_battles(), 0);
-        assert_eq!(
-            view.ds_result(view.get("1").unwrap()).map(|r| r.score),
-            Some(Some(30))
         );
     }
 
@@ -1028,11 +846,13 @@ mod tests {
             profile("me", "Player One"),
             FRIDAY,
         ));
-        let foreign = roster("theirs", vec![member("9", "Zed", 5, 999)]);
+        let foreign = roster("theirs", vec![member_entry("9", "Zed", 5, 999)]);
         assert!(!view.apply(&message("al.rank", foreign, FRIDAY + 60)));
-        let uids: Vec<&str> = view.players().map(|p| p.uid.as_str()).collect();
-        assert_eq!(uids, ["1"]);
-        assert_eq!(view.roster_at, Some(Duration::from_secs(FRIDAY)));
+        assert_eq!(roster_uids(&view), ["1"]);
+        assert_eq!(
+            view.roster.as_ref().unwrap().time,
+            Duration::from_secs(FRIDAY)
+        );
     }
 
     #[test]
@@ -1042,11 +862,10 @@ mod tests {
             vec![battle(FRIDAY, true, &[("1", 5)])],
             Duration::from_secs(FRIDAY),
         );
-        let other = roster("theirs", vec![member("9", "Zed", 5, 999)]);
+        let other = roster("theirs", vec![member_entry("9", "Zed", 5, 999)]);
         assert!(view.apply(&message("al.rank", other, FRIDAY + 60)));
         assert_eq!(view.alliance_id(), Some("theirs"));
-        let uids: Vec<&str> = view.players().map(|p| p.uid.as_str()).collect();
-        assert_eq!(uids, ["9"]);
+        assert_eq!(roster_uids(&view), ["9"]);
         assert_eq!(view.ds_battles().count(), 0);
         assert_eq!(view.unattributed_battles(), 0, "the old load is dropped");
     }
@@ -1062,12 +881,12 @@ mod tests {
         ));
         view.apply(&message(
             "al.battle.rank.info",
-            ranking(4, &[("1", 300)]),
+            ranking(4, &[("1", 300, "ours")]),
             FRIDAY,
         ));
         view.apply(&message(
             "dragon.assign.player.info",
-            obj(vec![("users", Value::Array(vec![assigned("1", 1)]))]),
+            participants(vec![participant_entry("1", 1)]),
             FRIDAY,
         ));
         view.set_ds_battles(
@@ -1089,21 +908,18 @@ mod tests {
             ),
             (Some("new"), Some("New Alliance"), Some("NEW"))
         );
-        assert_eq!(view.players().count(), 0);
+        assert_eq!(view.roster, None);
+        assert_eq!(view.ds_signups, None);
+        assert!(view.vs_days.iter().all(Option::is_none));
         assert_eq!(view.ds_battles().count(), 0);
         assert_eq!(view.unattributed_battles(), 0);
-        assert_eq!(
-            (view.roster_at, view.signups_at, view.vs_at),
-            (None, None, None)
-        );
 
-        // The old alliance's list no longer applies; the new one's does, without the old
-        // alliance's VS scores.
-        let old = roster("ours", vec![member("1", "Ann", 4, 100)]);
+        // The old alliance's list no longer applies; the new one's does.
+        let old = roster("ours", vec![member_entry("1", "Ann", 4, 100)]);
         assert!(!view.apply(&message("al.rank", old, FRIDAY + 120)));
-        let new = roster("new", vec![member("1", "Ann", 1, 100)]);
+        let new = roster("new", vec![member_entry("1", "Ann", 1, 100)]);
         assert!(view.apply(&message("al.rank", new, FRIDAY + 120)));
-        assert_eq!(view.get("1").unwrap().vs_scores, [None; 6]);
+        assert_eq!(roster_uids(&view), ["1"]);
     }
 
     #[test]

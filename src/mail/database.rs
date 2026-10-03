@@ -63,7 +63,7 @@ pub fn read_snapshot(path: &Path) -> Result<Vec<u8>, String> {
             return Ok(bytes);
         }
     }
-    Err("the game is saving its mail; try again in a moment".into())
+    Err("the game is saving its mail; the next read tries again".into())
 }
 
 /// Reads the whole file, or its first `limit` bytes, through a read-only handle. Rust opens

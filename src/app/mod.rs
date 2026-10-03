@@ -1,5 +1,5 @@
 //! Ties the parts together: live capture on a background thread, the status window in front,
-//! and Load mail on request.
+//! the mail read at start-up and every 5 minutes, and the update check.
 
 pub mod export;
 pub mod state;
@@ -18,8 +18,9 @@ use crate::capture::npcap::{self, Capture};
 use crate::capture::pipeline::{GAME_PORTS, Pipeline};
 use crate::mail::database as mail;
 use crate::ui::window;
+use crate::update::{self, install};
 use crate::util::time;
-use state::State;
+use state::{Install, State};
 
 /// Packets waiting between the adapter readers and the decoder. When full, readers wait, and
 /// anything Npcap drops meanwhile is handled as a stream gap. Packets are captured whole (up
@@ -27,11 +28,29 @@ use state::State;
 /// of up to 1,514 bytes make that about 1.5 MB.
 const PACKET_QUEUE: usize = 1_024;
 
+/// How often the mail database is read.
+const MAIL_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// How long a new version, started by an update, waits for the old one to close.
+const UPDATE_HANDOVER: Duration = Duration::from_secs(15);
+
 pub fn run() -> Result<(), String> {
-    if window::already_running() {
+    let updated = std::env::args().any(|a| a == install::UPDATED_ARG);
+    let wait = if updated {
+        UPDATE_HANDOVER
+    } else {
+        Duration::ZERO
+    };
+    if window::already_running(wait) {
         return Err("LastWarHQ Scanner is already running.".into());
     }
+    if let Ok(exe) = std::env::current_exe() {
+        install::clean_up(exe);
+    }
     let state = Arc::new(Mutex::new(State::default()));
+    if updated {
+        lock(&state).update.install = Install::Updated;
+    }
     {
         let state = Arc::clone(&state);
         thread::spawn(move || {
@@ -45,6 +64,16 @@ pub fn run() -> Result<(), String> {
             });
         });
     }
+    {
+        let state = Arc::clone(&state);
+        thread::spawn(move || {
+            loop {
+                load_mail(&state);
+                thread::sleep(MAIL_EVERY);
+            }
+        });
+    }
+    update::watch(Arc::clone(&state));
     window::run(state)
 }
 
@@ -179,9 +208,8 @@ fn start_reader(adapter: &Adapter, filter: &str, tx: SyncSender<Event>) -> Resul
 /// Copies the game's mail database into memory, reads this week's Desert Storm results from
 /// the copy, and drops the copy. The file itself is only read. The result is applied as of
 /// when reading finished, and only if the account, alliance and week are still those it
-/// started with. Always returns a short summary, even if reading fails unexpectedly, so the
-/// window can re-enable its button.
-pub fn load_mail(state: &Mutex<State>) -> String {
+/// started with. A failure, even an unexpected one, is recorded in the state.
+pub fn load_mail(state: &Mutex<State>) {
     let started = lock(state).start_mail_load(time::now());
     let read = || {
         let path = mail::db_path().ok_or_else(|| "USERPROFILE is not set".to_string())?;
@@ -193,10 +221,10 @@ pub fn load_mail(state: &Mutex<State>) -> String {
     };
     let result = panic::catch_unwind(read)
         .unwrap_or_else(|p| Err(format!("internal error: {}", panic_text(p.as_ref()))));
-    lock(state).finish_mail_load(&started, result, time::now())
+    lock(state).finish_mail_load(&started, result, time::now());
 }
 
 /// Locks the shared state, also after another thread panicked while holding it.
-fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+pub fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }

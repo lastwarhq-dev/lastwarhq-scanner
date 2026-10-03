@@ -1,11 +1,11 @@
 # LastWarHQ Scanner
 
 A small Windows tool that collects your alliance's data from the **Last War: Survival** PC client
-while you play: the member roster, Desert Storm sign-ups and results, and VS duel scores. It
-gathers everything in one window and copies it out as JSON for use in other tools.
+while you play: the member roster, Desert Storm sign-ups and results, and VS duel scores. One
+window shows what has been collected and what is still missing.
 
 It works by **reading the game's own network traffic**, passively. It never sends anything to
-the game, never touches the game process, and saves nothing to disk.
+the game and never touches the game process.
 
 > **Unofficial.** Not affiliated with or endorsed by the makers of Last War: Survival. Game
 > terms of service may prohibit third-party tools, even passive ones. Use it at your own risk.
@@ -29,7 +29,8 @@ install.
 
 1. Download `lastwarhq-scanner.exe` from the [latest release](../../releases/latest). To check
    the download, compare `Get-FileHash lastwarhq-scanner.exe` (PowerShell) with the SHA-256
-   in the release notes.
+   in the release notes. Put it in a folder you can write to (not Program Files), so it can
+   update itself.
 2. Start the game and log in.
 3. Run `lastwarhq-scanner.exe`.
    - The exe isn't code-signed, so Windows SmartScreen may say "Windows protected your PC".
@@ -37,7 +38,7 @@ install.
    - If Npcap was installed with "Restrict Npcap driver's access to Administrators only",
      Windows asks for admin approval **once each time the tool starts**. Approve it, or capture
      can't start.
-4. The status line turns green with **Connected · server · heartbeat**.
+4. Under the headline, the dot turns green with **Game connected**.
 5. In the game, open the panels whose data you want. The tool only sees what the game loads:
 
 | To get… | Open in the game |
@@ -45,66 +46,104 @@ install.
 | Ranks, power, kills | the **alliance member list** |
 | Hero power, Desert Storm time slots and teams | the **Desert Storm participants** panel |
 | VS scores | the **VS duel** panel, and each **day tab** you want |
-| Desert Storm results | press **Load mail** in the tool (see below) |
+| Desert Storm results | nothing: the tool reads them from the game's mail (see below) |
 
-6. Press **Copy JSON** and paste the result wherever you need it.
+When everything is loaded, the headline says **All in sync**.
 
 Only one copy of the tool runs at a time.
 
 ### The window
 
-| Line | Shows |
+| Part | Shows |
 |---|---|
-| Status | Capture state. Green: connected to the game server, with the time since its last heartbeat (every 4 s). Amber: searching for the game, or no heartbeat. Red: capture failed, with the reason. |
-| Account | The logged-in player and alliance. Identified at login, when the VS panel opens, or when mail arrives. |
-| Week | The current VS week (Monday–Sunday, UTC) and today. |
-| Roster | Players in the alliance member list, and when it was last loaded. |
-| DS sign-ups | How many players picked Desert Storm time slots, and how many are assigned to a team. |
-| DS results | This week's Desert Storm battles (Team A/B, won/lost) after **Load mail**. |
-| VS scores | Which VS days (Mon–Sat) have been loaded. `…` marks today, which is still in progress. |
-| Activity | Messages decoded from the game, and when the last arrived. |
+| Headline | **All in sync** (green tick): the game is connected, every row has a green tick (or is closed), and every finished VS day is loaded. **Open the game panels** (amber): connected, but something is missing; the rows say what. **Waiting for the game** or **Starting capture** (grey): no game connection yet. **Not capturing** (red): capture failed. |
+| Line under it | The game connection. Green: connected, with a heartbeat (every 4 s) in the last 12 s. Grey: searching for the game, or no heartbeat. Red: why capture failed. |
+| Alliance | The account's alliance, as `[ABBR] Name`. Click the row to copy the alliance ID. The member list names the alliance only by id; the name comes with the identified account's profile or the Desert Storm participants panel, and until then the row shows the id. Until either has arrived, **Open the member list**. |
+| Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
+| DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
+| DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
+| VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
+| Footer | The version, or an update (see [Updates](#updates)). **Copy JSON** copies the [data payload](#data-payload). |
 
-All times are UTC. Until their data arrives, the data lines say which panel to open (or, for
-DS results, to press Load mail).
+### Desert Storm sign-ups
 
-### Load mail (Desert Storm results)
+Sign-ups and team assignments are for the week's battles, which end on Friday. From Saturday,
+the participants panel still lists the alliance, but with empty time slots and no other sign-up
+fields. So from Saturday 02:00 UTC (the end of Friday, server time) until the Monday 02:00 UTC
+reset, the tool clears the week's sign-ups, ignores the panel, and leaves `dsSignups` out of the
+payload. Sign-ups sent earlier in the week are the record for that week.
+
+### Desert Storm results (mail)
 
 Desert Storm results aren't sent with the panels; the game keeps them in its local mail
-database (`%USERPROFILE%\AppData\LocalLow\FunFly\Last War-Survival Game\config.db`). **Load mail**
-reads that file, only when pressed:
+database (`%USERPROFILE%\AppData\LocalLow\FunFly\Last War-Survival Game\config.db`). The tool
+reads that file when it starts and every 5 minutes after:
 
 - It's **read-only**: the file is opened without locking it, copied into memory, and closed. The
   tool never writes to it, and doesn't use a SQLite library, which could change the file while
   opening it.
 - If the game is in the middle of saving, the tool waits and retries rather than read a
-  half-written file.
+  half-written file. A read that fails keeps what the last good read found.
 - It keeps only **this week's** Desert Storm result mails. The file holds the mail of every
   account played on the PC, so a battle counts only if it was fought by your alliance. The
   alliance comes from your profile or the alliance member list; until one of them has arrived,
-  no battle is counted and the line says to open the member list.
-- The team for each battle comes from the participants panel, so open that first.
+  no battle is counted and the row says to open the member list.
+- Each battle is kept as its mail gives it: when it ended, won or lost, and each player's uid
+  and score. The tool doesn't work out teams or who was absent; the receiver can, from the
+  sign-ups.
 - If the account, alliance or week changes while the file is being read, the result is
-  dropped; press Load mail again.
+  dropped; the next read picks up the change.
 
-### Copy JSON
+### Updates
+
+The tool checks GitHub for a new release when it starts and every hour after. When there is
+one, the footer says **Update available** with an **Update now** button.
+
+Pressing it asks first, because the tool restarts to finish: restarting clears the data
+loaded so far, so the game panels need opening again, and Windows may ask for admin approval
+again. Then the tool:
+
+1. Downloads the new `lastwarhq-scanner.exe` and its SHA-256 file from the release, and
+   checks that they match.
+2. Renames the running exe to `lastwarhq-scanner.exe.old` (Windows won't overwrite a running
+   exe, but lets it be renamed) and puts the new one in its place.
+3. Starts the new version and closes. The new version waits for the old one to close,
+   removes the `.old` file, and says **Updated to version …** in the footer.
+
+If a step fails, the footer says why, the running exe stays as it was, and the button
+becomes **Try again**.
+
+### Data payload
+
+The tool builds this payload for a sync to other tools (`src/app/export.rs`); **Copy JSON**
+copies it, so it can be checked by hand. Nothing sends it yet.
+
+Each panel's newest list is sent as the game sent it, and every entry carries the player's
+`uid`. The tool doesn't merge panels or work anything out from them; the receiver joins them
+by `uid`. Nothing is sent twice: names and power come only from the roster, and the alliance
+only from `alliance`, so the other sections carry just what their panel adds.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "week": "2026-09-28",
   "generated": "2026-10-04T12:00:00Z",
-  "account": { "uid": "…", "name": "…", "allianceId": "…", "allianceName": "…", "allianceAbbr": "…" },
-  "updated": { "roster": "…Z", "dsSignups": "…Z", "dsResults": "…Z", "vs": "…Z" },
-  "players": [
-    {
-      "uid": "…", "name": "…", "rank": 4,
-      "stats": { "power": 250000000, "heroPower": 140000000, "armyKill": 2000000 },
-      "desertStorm": {
-        "chooseTimeList": [2, 1],
-        "result": { "team": 1, "attended": true, "score": 5000000, "won": false }
-      },
-      "vsScores": [90000000, 40000000, null, null, null, null]
-    }
+  "alliance": { "id": "…", "name": "…", "abbr": "…", "warzone": 901 },
+  "roster": {
+    "updated": "…Z", "complete": true,
+    "players": [{ "uid": "…", "name": "…", "rank": 4, "power": 250000000, "armyKill": 2000000 }]
+  },
+  "dsSignups": {
+    "updated": "…Z", "complete": true,
+    "players": [{ "uid": "…", "heroPower": 140000000, "chooseTimeList": [2, 1], "group": 1 }]
+  },
+  "dsResults": {
+    "updated": "…Z",
+    "battles": [{ "time": "…Z", "won": false, "complete": true, "players": [{ "uid": "…", "score": 5000000 }] }]
+  },
+  "vs": [
+    { "updated": "…Z", "complete": true, "players": [{ "uid": "…", "score": 90000000 }] },
+    null, null, null, null, null
   ]
 }
 ```
@@ -113,27 +152,30 @@ reads that file, only when pressed:
 |---|---|
 | `schemaVersion` | Version of this layout; raised whenever fields change meaning or shape. |
 | `week` | Monday (UTC date) of the VS week the data belongs to. |
-| `account.allianceId` | The alliance the data belongs to: from the account's profile, or else from the member list. |
-| `updated` | When each part was last updated (UTC), or `null` if not loaded. `dsSignups`, `dsResults` and `vs` reset to `null` at the weekly reset; `roster` keeps its time, as the roster stays. `dsResults` stays `null` until the alliance is known. |
-| `rank` | Alliance rank 1–5 (R5 highest). |
-| `stats.heroPower` | "Total Hero Power" from the Desert Storm participants panel: hero strength without troops. |
-| `desertStorm.chooseTimeList` | Time slots the player picked, in the order clicked: `1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC. |
-| `desertStorm.result` | `team` 1 = Team A, 2 = Team B. `attended` means scored above 0. A player assigned to a team but missing from its battle has `attended: false` and `score: null`. `null` means no part this week, or that a player entry in a result mail couldn't be read, so absence can't be told. |
-| `vsScores` | Personal VS score per day, Monday–Saturday. Only completed days; `null` until loaded. |
+| `alliance.id` | The alliance the data belongs to: from the logged-in account's own messages, or, until those name it, from the member list. `alliance` is `null` until either has arrived. The logged-in player isn't named separately: they are one of the `roster` players. |
+| `alliance.name`, `alliance.abbr` | From the account's profile or the Desert Storm participants panel; `null` while the alliance is known only from the member list. |
+| `alliance.warzone` | The `serverId` the member list gives its members, when every member that has one has the same; `null` until the member list has arrived, or if they differ. Sent once here rather than per member. |
+| `updated` | When that panel's list arrived (UTC). |
+| `complete` | Every entry in the list could be read. When `false`, a player missing from `players` may still be on the panel. |
+| `roster` | The alliance member list. `rank` is 1–5 (R5 highest). Kept across the weekly reset. |
+| `dsSignups` | The Desert Storm participants panel, without the name and power the roster gives. `heroPower` is "Total Hero Power". `chooseTimeList`: time slots picked, in the order clicked (`1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC). `group`: team assigned, `1` = Team A, `2` = Team B, `0` = none. `null` from Saturday 02:00 UTC to the Monday reset. |
+| `dsResults` | This week's battles from the result mails: when each ended, whether it was won, and each player's score. `complete: false` means a player entry in the mail couldn't be read. `null` until the mail has been read and the alliance is known. |
+| `vs` | Monday to Saturday: each completed day's VS ranking, `null` until that day's tab has been opened. The ranking lists both alliances; only our alliance's players are sent, so `players` is empty until the alliance is known. `complete` is `false` if any row of the ranking couldn't be read, or had no alliance (it might be one of ours). |
 
-Unknown values are `null`.
+Unknown values are `null`. Sections cleared at the weekly reset (`dsSignups`, `dsResults`,
+`vs`) go back to `null`.
 
 ### Weekly reset
 
 VS days end at **02:00 UTC** (midnight server time), and the week rolls over on Monday at
-02:00 UTC. At the rollover, the tool clears that week's data: VS scores, Desert Storm results,
-sign-ups and team assignments. The roster stays. This happens even if the game is closed. Copy
-JSON checks for the rollover before copying, game messages from the week that has ended are
-ignored, and **Load mail** in a new week ignores last week's battles, so a copy never mixes two
-weeks.
+02:00 UTC. At the rollover, the tool clears that week's data: VS rankings, Desert Storm
+results and sign-ups. The roster stays. This happens even if the game is closed. The
+payload is built after checking for the rollover, game messages from the week that has ended
+are ignored, and mail read in a new week ignores last week's battles, so the data never mixes
+two weeks.
 
 Switching to another game account also clears everything and starts fresh. If the account
-moves to another alliance, the old alliance's players, scores, sign-ups and results are
+moves to another alliance, the old alliance's member list, rankings, sign-ups and results are
 cleared. Once the account's alliance is known, another alliance's member list is ignored.
 
 ### Troubleshooting
@@ -142,23 +184,25 @@ cleared. Once the account's alliance is known, another alliance's member list is
 |---|---|
 | "Npcap is not installed" | Install Npcap from https://npcap.com and start the tool again. |
 | Stays on "Starting capture" | Approve the Windows admin prompt; it may be behind other windows. |
-| "Searching for the game" | Start the game and log in. |
-| "No heartbeat" | The game was closed or lost connection. The tool picks up the new connection by itself. |
-| Account says "waiting" | Open the VS panel, or log in again. |
+| "Waiting for the game" · "Start the game and log in" | Start the game and log in. |
+| "No heartbeat from the game" | The game was closed or lost connection. The tool picks up the new connection by itself. |
 | "LastWarHQ Scanner is already running" | Another copy is open; use that one. |
-| Mail: "the game is saving its mail" | Press Load mail again in a moment. |
-| DS results: "battles loaded · open the alliance member list" | Open the member list so the tool knows which battles are your alliance's. |
-| Mail: "WAL mode, which is not supported" | The game stored its mail in a format the tool doesn't read. Please report it. |
+| DS results: "Mail: the game is saving its mail" | Nothing; the next read, within 5 minutes, tries again. |
+| DS results: "Open the member list" | Open the member list so the tool knows which battles are your alliance's. |
+| DS results: "Mail: … WAL mode, which is not supported" | The game stored its mail in a format the tool doesn't read. Please report it. |
+| "Update failed: cannot save the update beside the exe" | The exe's folder isn't writable (for example Program Files). Move the exe to a folder you own, or download the release by hand. |
 
 ### What it does and doesn't do
 
 - **Receives only.** It captures a copy of the traffic on the game's ports. Only the server's
   messages are decoded; the game's own requests are encrypted and only counted. It sends
-  nothing to the game, opens no network connections of its own, and listens on no ports.
+  nothing to the game and listens on no ports. Its only connections of its own are to GitHub
+  (`api.github.com` and `github.com`, over HTTPS): one an hour to check for a new release, and,
+  when you press Update now, to download it.
 - **Hands off the game.** It never hooks, reads the memory of, or modifies the game. The only
-  game file it reads is the mail database, and only when you press Load mail.
-- **Memory only.** Data lives in memory while the tool runs and is gone when it closes. Nothing
-  is written to disk.
+  game file it reads is the mail database.
+- **Memory only.** Data lives in memory while the tool runs and is gone when it closes. The
+  only file the tool writes is its own exe, when you update it.
 - **No login data kept.** The game's login messages (`login.ext`, `login.other`, `init`) are
   decoded like every other message as they pass through, but nothing in them is used, kept,
   shown or copied.
@@ -188,9 +232,10 @@ The exe is `target\release\lastwarhq-scanner.exe`.
 - **No Npcap SDK needed:** Npcap's `wpcap.dll` is loaded at run time.
 
 The exe depends on two crates directly: `etherparse` (packet headers) and `ruzstd` (zstd
-decompression), which bring in `arrayvec` and `twox-hash`. The window (Win32), the SQLite reader, JSON and SmartFox decoding are written in
-the project, with bounds checks so damaged input gives an error rather than a crash. Damaged
-input also can't make them use much memory:
+decompression), which bring in `arrayvec` and `twox-hash`. The window (Win32, drawn with GDI+
+and GDI), the update download (WinHTTP, with SHA-256 from Windows' `bcrypt`), the SQLite
+reader, JSON and SmartFox decoding are written in the project, with bounds checks so damaged
+input gives an error rather than a crash. Damaged input also can't make them use much memory:
 
 - The SQLite reader uses each page and cell once, decodes no more payload than the file
   holds, and reads rows one at a time.
@@ -208,8 +253,10 @@ cargo fmt --check
   pages, oversized compressed frames, packets missed by the capture, messages from an ended
   week, and partly readable lists. They also cover account, alliance and week changes,
   including a mail load that crosses the weekly reset, and the connection and memory limits.
+  For updates, they cover versions, release replies, checksum files and swapping the exe
+  (on files in a temporary folder).
 - No test uses real game data: no captures, no game files. None of them need Npcap or the game
-  installed.
+  installed, and none connect to the network.
 
 ### Releases
 
@@ -217,8 +264,9 @@ cargo fmt --check
 
 1. On Windows: formatting, Clippy and the tests, then `cargo build --release --locked`.
 2. The exe and its SHA-256 are kept as a workflow artifact.
-3. A new release, `v<version>-build.<run number>`, is published with both files and marked
-   as the latest.
+3. If the version in `Cargo.toml` has no release yet, a release `v<version>` is published with
+   both files and marked as the latest. Otherwise nothing is published. Raising the version is
+   what releases a new version, and every running copy offers it as an update within an hour.
 
 The build job only has read access to the repository; the separate publish job is the only one
 that can create releases. The workflow uses only GitHub's own actions (`checkout`,
@@ -228,12 +276,13 @@ that can create releases. The workflow uses only GitHub's own actions (`checkout
 
 | Folder | Job |
 |---|---|
-| `src/app` | Start-up, capture loop, Load mail; shared state; the JSON export |
+| `src/app` | Start-up, capture loop, mail reads; shared state; the data payload |
 | `src/capture` | Adapter list, Npcap capture, TCP reassembly, locking on to the game connection |
 | `src/protocol` | SmartFox framing, decompression and SFSObject decoding |
 | `src/game` | The player view, account, player records, Desert Storm battles and VS week rules |
 | `src/mail` | The read-only SQLite reader and Desert Storm result mails |
-| `src/ui` | The Win32 window and its status text |
+| `src/ui` | The Win32 window, what it shows, and drawing it |
+| `src/update` | Checking GitHub for releases; downloading, checking and swapping in the new exe |
 | `src/util` | JSON and UTC time helpers |
 | `.github/workflows` | The release build |
 
@@ -372,8 +421,8 @@ nothing over the game connection: the game already holds the mail locally.
 - The database can hold other accounts' alliances' battles, so only battles of our alliance
   (`alliances[0].alId`) are used. Until our alliance is known (see [Account](#account)), no
   battle is used.
-- If an entry in `ranks` can't be read, nobody is judged absent that week: the unreadable
-  entry could be any player.
+- If an entry in `ranks` can't be read, the battle is marked incomplete: the unreadable entry
+  could be any player.
 - Each account on the PC gets its own copy of a battle's mail, seconds apart. Copies are
   recognised by the same alliance, opponent and scores within 10 minutes.
 - While the game runs it keeps `config.db` open. A reader that allows read/write/delete sharing
@@ -418,16 +467,15 @@ Until one of those names the account's alliance, the member list's `allianceId` 
 it, and a member list from another alliance replaces the roster. Once the account's alliance is
 known, member lists from other alliances are ignored.
 
-### Merging into the view
+### Keeping the panels
 
-- One record per player, keyed by `uid`. Each message updates only the fields it carries, and
-  the newest value wins.
-- The member list and the participants panel each list the whole alliance, so a player missing
-  from the newest one has left and is removed. An empty list changes nothing, and a list with
-  any unreadable entry updates players but removes nobody.
-- VS scores are kept by uid for the week, whatever order panels are opened in. They show only
-  on players in the roster, so the opponent's players never appear. Today's scores are skipped
-  until the day ends.
+- Each panel keeps only its newest list, as sent: the member list, the participants panel,
+  and one VS ranking per day. Panels aren't merged; every entry carries its player's `uid`.
+- A newer list replaces the last one whole. An empty list (nothing readable) changes nothing.
+  A list with an unreadable entry is kept and marked incomplete.
+- Today's VS ranking is skipped until the day ends.
+- From Saturday, the participants panel lists the alliance with empty `chooseTimeList` and no
+  other sign-up fields; see [Desert Storm sign-ups](#desert-storm-sign-ups).
 
 ### Other findings
 

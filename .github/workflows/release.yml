@@ -1,8 +1,10 @@
 name: Release
 
-# Every push to main, including merged pull requests, is checked, built and published as a new
-# release. The build job only has read access; the publish job is the only one that can write,
-# so nothing that runs during the build (such as crate build scripts) can change releases.
+# Every push to main, including merged pull requests, is checked and built. A release, tagged
+# v<version>, is published only when the version in Cargo.toml has no release yet; the tool
+# offers each new release to its users as an update. The build job only has read access; the
+# publish job is the only one that can write, so nothing that runs during the build (such as
+# crate build scripts) can change releases.
 
 on:
   push:
@@ -75,10 +77,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          tag="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
-          # A re-run of a workflow keeps its run number; its release already exists.
+          tag="v${VERSION}"
+          # Pushes that keep the version publish nothing; raise it in Cargo.toml to release.
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "$tag is already released"
+            echo "$tag is already released; raise the version in Cargo.toml to publish a new release"
             exit 0
           fi
           sha256sum --check lastwarhq-scanner.exe.sha256
@@ -91,6 +93,6 @@ jobs:
           gh release create "$tag" lastwarhq-scanner.exe lastwarhq-scanner.exe.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "LastWarHQ Scanner ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --title "LastWarHQ Scanner ${VERSION}" \
             --notes "$notes" \
             --latest

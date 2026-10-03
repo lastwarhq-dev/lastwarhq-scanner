@@ -5,20 +5,44 @@ use std::time::Duration;
 use crate::game::battle::DsBattle;
 use crate::game::view::View;
 use crate::protocol::message::Message;
+use crate::update::Version;
 
 #[derive(Debug, Default)]
 pub struct State {
     pub view: View,
     pub capture: Capture,
     pub mail: MailStatus,
+    pub update: UpdateStatus,
 }
 
-/// The last "Load mail" press.
+/// The mail reads, at start-up and every few minutes.
 #[derive(Debug, Default)]
 pub struct MailStatus {
+    /// When the last successful read finished.
     pub loaded: Option<Duration>,
-    /// Why the load failed, if it did.
+    /// Why the last read failed, if it did. A failed read keeps what an earlier one loaded.
     pub error: Option<String>,
+}
+
+/// New releases, and installing one.
+#[derive(Debug, Default)]
+pub struct UpdateStatus {
+    /// The latest release, as of the last successful check; `None` if it names no version.
+    pub latest: Option<Version>,
+    /// When the last successful check was.
+    pub checked: Option<Duration>,
+    pub install: Install,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum Install {
+    #[default]
+    Idle,
+    Downloading,
+    /// Why the last install failed.
+    Failed(String),
+    /// This process was started by an update.
+    Updated,
 }
 
 #[derive(Debug, Default)]
@@ -80,18 +104,17 @@ impl State {
     }
 
     /// Applies a finished mail load, read since `started`, as of `now` (when reading finished).
-    /// If the account, alliance or week changed while reading, the result is dropped: the
-    /// user presses Load mail again. Returns a short summary for the window.
+    /// If the account, alliance or week changed while reading, the result is dropped; the next
+    /// read picks up the change.
     pub fn finish_mail_load(
         &mut self,
         started: &Identity,
         result: Result<Vec<DsBattle>, String>,
         now: Duration,
-    ) -> String {
+    ) {
         self.tick(now);
         if started.moved_on(&self.identity()) {
-            return "The game changed account, alliance or week while reading · press Load mail again"
-                .to_string();
+            return;
         }
         match result {
             Ok(battles) => {
@@ -100,35 +123,9 @@ impl State {
                     loaded: Some(now),
                     error: None,
                 };
-                match (
-                    self.view.ds_battles().count(),
-                    self.view.unattributed_battles(),
-                ) {
-                    (_, n) if n > 0 => {
-                        "Loaded · open the alliance member list to match battles to the alliance"
-                            .to_string()
-                    }
-                    (0, _) => "No Desert Storm results this week".to_string(),
-                    (1, _) => "Loaded 1 Desert Storm battle".to_string(),
-                    (n, _) => format!("Loaded {n} Desert Storm battles"),
-                }
             }
-            Err(err) => {
-                self.mail = MailStatus {
-                    loaded: Some(now),
-                    error: Some(err.clone()),
-                };
-                format!("Mail load failed: {err}")
-            }
+            Err(err) => self.mail.error = Some(err),
         }
-    }
-
-    /// The account's name, or its player record's name until its own profile arrives.
-    pub fn account_name(&self) -> Option<String> {
-        let a = self.view.account()?;
-        a.name
-            .clone()
-            .or_else(|| self.view.get(&a.uid).and_then(|p| p.name.clone()))
     }
 
     fn identity(&self) -> Identity {
@@ -193,12 +190,11 @@ mod tests {
         state.record(&roster("ours", SATURDAY));
         let started = state.start_mail_load(Duration::from_secs(SATURDAY));
         let finished = Duration::from_secs(SATURDAY + 3);
-        let summary = state.finish_mail_load(
+        state.finish_mail_load(
             &started,
             Ok(vec![battle("ours", SATURDAY - 3600)]),
             finished,
         );
-        assert_eq!(summary, "Loaded 1 Desert Storm battle");
         assert_eq!(state.mail.loaded, Some(finished));
         assert_eq!(state.view.ds_battles().count(), 1);
     }
@@ -211,8 +207,7 @@ mod tests {
         state.record(&roster("ours", SATURDAY));
         let started = state.start_mail_load(Duration::from_secs(RESET - 1));
         state.tick(Duration::from_secs(RESET));
-        let summary = state.finish_mail_load(&started, last_week(), Duration::from_secs(RESET + 1));
-        assert!(summary.contains("press Load mail again"), "{summary}");
+        state.finish_mail_load(&started, last_week(), Duration::from_secs(RESET + 1));
         assert_eq!(state.mail.loaded, None);
         assert_eq!(state.view.ds_battles().count(), 0);
         assert_eq!(state.view.unattributed_battles(), 0);
@@ -246,18 +241,43 @@ mod tests {
         let mut state = State::default();
         // Loaded before the alliance was known: learning it keeps the load.
         let started = state.start_mail_load(Duration::from_secs(SATURDAY));
-        let summary = state.finish_mail_load(
+        state.finish_mail_load(
             &started,
             Ok(vec![battle("ours", SATURDAY - 3600)]),
             Duration::from_secs(SATURDAY),
         );
-        assert!(summary.contains("member list"), "{summary}");
+        assert_eq!(state.view.unattributed_battles(), 1);
         state.record(&roster("ours", SATURDAY + 1));
         assert!(state.mail.loaded.is_some());
         assert_eq!(state.view.ds_battles().count(), 1);
         // Another alliance's roster replaces ours: the load belonged to the old alliance.
         state.record(&roster("theirs", SATURDAY + 2));
         assert_eq!(state.mail.loaded, None);
+    }
+
+    #[test]
+    fn failed_mail_load_keeps_the_last_good_one() {
+        let mut state = State::default();
+        state.record(&roster("ours", SATURDAY));
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY));
+        let loaded = Duration::from_secs(SATURDAY + 1);
+        state.finish_mail_load(&started, Ok(vec![battle("ours", SATURDAY - 3600)]), loaded);
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY + 300));
+        state.finish_mail_load(
+            &started,
+            Err("the game is saving its mail".into()),
+            Duration::from_secs(SATURDAY + 301),
+        );
+        assert_eq!(state.mail.loaded, Some(loaded));
+        assert_eq!(
+            state.mail.error.as_deref(),
+            Some("the game is saving its mail")
+        );
+        assert_eq!(state.view.ds_battles().count(), 1);
+        // The next good read clears the error.
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY + 600));
+        state.finish_mail_load(&started, Ok(vec![]), Duration::from_secs(SATURDAY + 601));
+        assert_eq!(state.mail.error, None);
     }
 
     #[test]
