@@ -144,8 +144,7 @@ impl Entry for Participant {
 }
 
 impl Participant {
-    /// `{"uid", "heroPower", "chooseTimeList", "group", "state"}`. A `state` other than 0, 1
-    /// or 2 would get the whole upload refused, so it is sent as unknown (`null`).
+    /// `{"uid", "heroPower", "chooseTimeList", "group", "state"}`
     pub fn to_json(&self) -> String {
         let slots = self
             .choose_time_list
@@ -158,10 +157,16 @@ impl Participant {
             "{{\"uid\":{},\"heroPower\":{},\"chooseTimeList\":{slots},\"group\":{},\"state\":{}}}",
             escape(&self.uid),
             int(count(self.hero_power)),
-            int(self.group),
-            int(self.state.filter(|s| (0..=2).contains(s)))
+            int(team_code(self.group)),
+            int(team_code(self.state))
         )
     }
+}
+
+/// A Desert Storm `group` or `state` as the API takes it: 0, 1 or 2. Anything else would get
+/// the whole upload refused, so it is sent as unknown (`null`).
+fn team_code(value: Option<i64>) -> Option<i64> {
+    value.filter(|v| (0..=2).contains(v))
 }
 
 /// A row of one day's VS ranking, `al.battle.rank.info`. The ranking lists both alliances;
@@ -226,7 +231,7 @@ mod tests {
             participant.to_json(),
             r#"{"uid":"9","heroPower":null,"chooseTimeList":[2,1,3],"group":0,"state":2}"#
         );
-        for (state, sent) in [
+        for (code, sent) in [
             (None, "null"),
             (Some(0), "0"),
             (Some(3), "null"),
@@ -234,13 +239,14 @@ mod tests {
         ] {
             let participant = Participant {
                 uid: "9".into(),
-                state,
+                group: code,
+                state: code,
                 ..Participant::default()
             };
             assert!(
                 participant
                     .to_json()
-                    .ends_with(&format!(r#""state":{sent}}}"#))
+                    .ends_with(&format!(r#""group":{sent},"state":{sent}}}"#))
             );
         }
         let empty = Participant {
