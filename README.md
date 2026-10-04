@@ -64,7 +64,7 @@ Only one copy of the tool runs at a time.
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
-| Footer | The version, or an update (see [Updates](#updates)). **Copy JSON** copies the [data payload](#data-payload). |
+| Footer | The version, or an update (see [Updates](#updates)). |
 
 ### Signing in to LastWarHQ
 
@@ -102,9 +102,10 @@ Once you're signed in, the tool uploads the [data payload](#data-payload) to Las
 - LastWarHQ decides whether you manage the alliance. If not, the row says so, and the tool
   tries again every 5 minutes, in case the alliance is added on the site.
 - If LastWarHQ refuses the data as invalid, the row says why, and the same data isn't sent
-  again; the next change is. Other failures (no connection, a server error) are retried after
-  a minute. If LastWarHQ no longer accepts the sign-in, the token is deleted and the row asks
-  you to sign in again.
+  again; the next change is. If LastWarHQ is busy with other uploads for the alliance (`503
+  busy`), the same upload goes again after the wait it asks for. Other failures (no connection,
+  a server error) are retried after a minute. If LastWarHQ no longer accepts the sign-in, the
+  token is deleted and the row asks you to sign in again.
 - After an upload, the row shows **synced HH:MM UTC**.
 
 ### Desert Storm sign-ups
@@ -157,8 +158,8 @@ becomes **Try again**.
 
 ### Data payload
 
-The tool syncs this payload to LastWarHQ (see [Syncing](#syncing)); **Copy JSON** copies the
-same, so it can be checked by hand. It's built in `src/app/export.rs`.
+The tool syncs this payload to LastWarHQ (see [Syncing](#syncing)). It's built in
+`src/app/export.rs`.
 
 - **Times** are on the game server's clock, since LastWarHQ orders uploads from several PCs by
   them: the tool reads the server's time from its ping replies (`serverTime`, every 4 s), and
@@ -177,7 +178,9 @@ same, so it can be checked by hand. It's built in `src/app/export.rs`.
 - **Values LastWarHQ would refuse are sent as unknown** (`null`), so one odd value can't get a
   whole upload refused: control characters are removed from names, and a name that is then
   empty or over 64 characters (16 for the tag), a negative power, kill count or score, or a
-  warzone outside 1–99,999 is `null`.
+  warzone outside 1–99,999 is `null`. In each list, a player whose uid isn't 1–20 digits, and
+  any past the 200th, is left out, and the list is then marked `complete: false`; a player named
+  twice keeps their first entry.
 
 Each panel's newest list is sent as the game sent it, and every entry carries the player's
 `uid`. The tool doesn't merge panels or work anything out from them; the receiver joins them

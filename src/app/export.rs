@@ -11,7 +11,9 @@
 use std::time::Duration;
 
 use crate::app::state::State;
-use crate::game::panel::{MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, game_text};
+use crate::game::panel::{
+    Entry, MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, game_text, players_for_api,
+};
 use crate::game::week::{monday_days, vs_day};
 use crate::util::json::escape;
 use crate::util::time::utc_iso;
@@ -86,12 +88,7 @@ pub fn payload(state: &mut State, now: Duration) -> Payload {
     }
 }
 
-/// The payload as sent; see [`payload`].
-pub fn payload_json(state: &mut State, now: Duration) -> String {
-    payload(state, now).json
-}
-
-fn panel_json<T>(panel: &Option<Panel<T>>, entry: impl Fn(&T) -> String) -> String {
+fn panel_json<T: Entry>(panel: &Option<Panel<T>>, entry: impl Fn(&T) -> String) -> String {
     panel
         .as_ref()
         .map_or_else(|| "null".into(), |p| p.to_json(entry))
@@ -201,16 +198,16 @@ fn ds_results_json(state: &State) -> String {
         .view
         .ds_battles()
         .map(|b| {
-            let players: Vec<String> = b
-                .players
-                .iter()
+            let (kept, readable) = players_for_api(&b.players, |(uid, _)| uid.as_str());
+            let players: Vec<String> = kept
+                .into_iter()
                 .map(|(uid, score)| format!("{{\"uid\":{},\"score\":{score}}}", escape(uid)))
                 .collect();
             format!(
                 "{{\"time\":{},\"won\":{},\"complete\":{},\"players\":[{}]}}",
                 escape(&utc_iso(b.time)),
                 b.won,
-                b.players_complete,
+                b.players_complete && readable,
                 players.join(",")
             )
         })
@@ -251,7 +248,7 @@ mod tests {
     }
 
     fn payload(state: &mut State, secs: u64) -> Json {
-        json::parse(&payload_json(state, Duration::from_secs(secs))).unwrap()
+        json::parse(&super::payload(state, Duration::from_secs(secs)).json).unwrap()
     }
 
     #[test]
@@ -383,6 +380,38 @@ mod tests {
         let tuesday = &v.get("vs").and_then(Json::as_array).unwrap()[1];
         let players = tuesday.get("players").and_then(Json::as_array).unwrap();
         assert_eq!(players.len(), 1);
+    }
+
+    #[test]
+    fn battle_players_the_api_would_refuse_are_left_out() {
+        let mut state = State::default();
+        state.record(&roster(SATURDAY));
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY));
+        let battle = DsBattle {
+            time: Duration::from_secs(SATURDAY - 9 * 3600),
+            won: true,
+            alliance_id: "ours".into(),
+            score: 1,
+            enemy_abbr: "X".into(),
+            enemy_name: "X".into(),
+            enemy_score: 0,
+            players: vec![("1".into(), 50), ("not-a-uid".into(), 9), ("1".into(), 7)],
+            players_complete: true,
+        };
+        state.finish_mail_load(&started, Ok(vec![battle]), Duration::from_secs(SATURDAY));
+        let v = payload(&mut state, SATURDAY);
+        let battles = v
+            .get("dsResults")
+            .and_then(|r| r.get("battles"))
+            .and_then(Json::as_array)
+            .unwrap();
+        assert_eq!(
+            battles[0],
+            json::parse(
+                r#"{"time":"2026-10-03T01:00:00Z","won":true,"complete":false,"players":[{"uid":"1","score":50}]}"#
+            )
+            .unwrap()
+        );
     }
 
     #[test]

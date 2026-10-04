@@ -17,17 +17,56 @@ pub struct Panel<T> {
     pub entries: Vec<T>,
 }
 
-impl<T> Panel<T> {
-    /// `{"updated", "complete", "players": [...]}`, each entry through `entry`.
+/// A list entry, which names its player by uid.
+pub trait Entry {
+    fn uid(&self) -> &str;
+}
+
+impl<T: Entry> Panel<T> {
+    /// `{"updated", "complete", "players": [...]}`, each entry through `entry`, cut to what the
+    /// API takes (see [`players_for_api`]).
     pub fn to_json(&self, entry: impl Fn(&T) -> String) -> String {
-        let players: Vec<String> = self.entries.iter().map(entry).collect();
+        let (kept, complete) = players_for_api(&self.entries, |e| e.uid());
+        let players: Vec<String> = kept.into_iter().map(entry).collect();
         format!(
             "{{\"updated\":{},\"complete\":{},\"players\":[{}]}}",
             escape(&utc_iso(self.time)),
-            self.complete,
+            self.complete && complete,
             players.join(",")
         )
     }
+}
+
+/// The most players a list may hold.
+pub const MAX_PLAYERS: usize = 200;
+
+/// A player uid as the API takes it: the game's id, 1 to 20 digits.
+pub fn valid_uid(uid: &str) -> bool {
+    (1..=20).contains(&uid.len()) && uid.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A list's entries as the API takes them, which would refuse the whole upload otherwise:
+/// entries whose uid isn't 1 to 20 digits, and any past the [`MAX_PLAYERS`]th, are left out,
+/// and then the list can't be complete (`false` is returned); a player named again keeps only
+/// their first entry.
+pub fn players_for_api<T>(entries: &[T], uid: impl Fn(&T) -> &str) -> (Vec<&T>, bool) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    let mut complete = true;
+    for entry in entries {
+        let id = uid(entry);
+        if !valid_uid(id) {
+            complete = false;
+        } else if seen.contains(id) {
+            // A repeat changes nothing, wherever it comes: the player is already in.
+        } else if kept.len() == MAX_PLAYERS {
+            complete = false;
+        } else {
+            seen.insert(id.to_string());
+            kept.push(entry);
+        }
+    }
+    (kept, complete)
 }
 
 /// The longest name the API takes, in characters.
@@ -63,6 +102,12 @@ pub struct Member {
     pub server_id: Option<i64>,
 }
 
+impl Entry for Member {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+}
+
 impl Member {
     /// `{"uid", "name", "rank", "power", "armyKill"}`
     pub fn to_json(&self) -> String {
@@ -88,6 +133,12 @@ pub struct Participant {
     pub choose_time_list: Option<Vec<i64>>,
     /// Team assigned: 1 = Team A, 2 = Team B, 0 = none.
     pub group: Option<i64>,
+}
+
+impl Entry for Participant {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
 }
 
 impl Participant {
@@ -117,6 +168,12 @@ pub struct VsScore {
     pub score: Option<i64>,
     /// The player's alliance (`aid`).
     pub alliance_id: Option<String>,
+}
+
+impl Entry for VsScore {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
 }
 
 impl VsScore {
@@ -188,6 +245,65 @@ mod tests {
                 member.to_json()
             )
         );
+    }
+
+    #[test]
+    fn lists_are_cut_to_the_players_the_api_takes() {
+        let member = |uid: &str, rank| Member {
+            uid: uid.into(),
+            rank: Some(rank),
+            ..Member::default()
+        };
+        let panel = |entries| Panel {
+            time: Duration::from_secs(1_791_021_600),
+            complete: true,
+            entries,
+        };
+        let uids = |json: &str| {
+            let list = crate::util::json::parse(json).unwrap();
+            let players = list.get("players").and_then(|p| p.as_array()).unwrap();
+            let uids: Vec<String> = players
+                .iter()
+                .map(|p| p.get("uid").and_then(|u| u.as_str()).unwrap().to_string())
+                .collect();
+            (uids, list.get("complete").cloned())
+        };
+        let complete = |b| Some(crate::util::json::Json::Bool(b));
+
+        // A uid that isn't 1-20 digits is left out, and the list can't be complete.
+        let json =
+            panel(vec![member("1", 1), member("x1", 2), member("", 3)]).to_json(Member::to_json);
+        assert_eq!(uids(&json), (vec!["1".to_string()], complete(false)));
+        let longest = "9".repeat(20);
+        let json =
+            panel(vec![member(&longest, 1), member(&"9".repeat(21), 2)]).to_json(Member::to_json);
+        assert_eq!(uids(&json), (vec![longest], complete(false)));
+
+        // A player named twice keeps their first entry; nobody is missing.
+        let json =
+            panel(vec![member("1", 5), member("2", 1), member("1", 4)]).to_json(Member::to_json);
+        assert_eq!(
+            uids(&json),
+            (vec!["1".to_string(), "2".to_string()], complete(true))
+        );
+        assert!(json.contains(r#""uid":"1","name":null,"rank":5"#));
+
+        // At most 200 players.
+        let many: Vec<Member> = (1..=201).map(|i| member(&i.to_string(), 1)).collect();
+        let (kept, complete_flag) = uids(&panel(many).to_json(Member::to_json));
+        assert_eq!((kept.len(), complete_flag), (MAX_PLAYERS, complete(false)));
+
+        // Exactly 200 players and a repeat of one of them: nobody is left out, wherever the
+        // repeat comes.
+        let full: Vec<Member> = (1..=200).map(|i| member(&i.to_string(), 1)).collect();
+        let mut repeat_last = full.clone();
+        repeat_last.push(member("7", 2));
+        let mut repeat_first = full;
+        repeat_first.insert(0, member("7", 2));
+        let last = uids(&panel(repeat_last).to_json(Member::to_json));
+        let first = uids(&panel(repeat_first).to_json(Member::to_json));
+        assert_eq!((last.0.len(), last.1), (MAX_PLAYERS, complete(true)));
+        assert_eq!((first.0.len(), first.1), (MAX_PLAYERS, complete(true)));
     }
 
     #[test]

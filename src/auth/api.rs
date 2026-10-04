@@ -28,6 +28,9 @@ pub enum ApiError {
     UnknownAlliance,
     /// `429 too_many_requests`: wait this many seconds (`Retry-After`), if given.
     TooManyRequests(Option<u64>),
+    /// `503 busy` from `sync`: other uploads for the alliance kept getting in first and nothing
+    /// from this one was saved. Send it again after this many seconds (`Retry-After`), if given.
+    Busy(Option<u64>),
     Failed(String),
 }
 
@@ -41,6 +44,7 @@ impl fmt::Display for ApiError {
                 f.write_str("LastWarHQ doesn't have this alliance for this account")
             }
             ApiError::TooManyRequests(_) => f.write_str("LastWarHQ asked to wait before syncing"),
+            ApiError::Busy(_) => f.write_str("LastWarHQ was busy with other uploads"),
             ApiError::Failed(why) => f.write_str(why),
         }
     }
@@ -150,6 +154,9 @@ fn reply(status: u32, body: &[u8], retry_after: Option<u32>) -> Result<Json, Api
             match (field("code"), field("message")) {
                 (Some("invalid_grant"), _) if status == 400 => Err(ApiError::InvalidGrant),
                 (Some("unknown_alliance"), _) if status == 404 => Err(ApiError::UnknownAlliance),
+                (Some("busy"), _) if status == 503 => {
+                    Err(ApiError::Busy(retry_after.map(u64::from)))
+                }
                 (Some("bad_request"), message) if status == 400 => Err(ApiError::BadRequest(
                     message.unwrap_or("no reason given").to_string(),
                 )),
@@ -269,6 +276,13 @@ mod tests {
             Err(ApiError::TooManyRequests(Some(42)))
         );
         assert_eq!(reply(429, b"", None), Err(ApiError::TooManyRequests(None)));
+        let busy = br#"{"error":{"code":"busy","message":"Try again"}}"#;
+        assert_eq!(reply(503, busy, Some(30)), Err(ApiError::Busy(Some(30))));
+        // A 503 that isn't the API's own (a gateway, say) is an ordinary failure.
+        assert_eq!(
+            reply(503, b"Service Unavailable", Some(30)),
+            Err(ApiError::Failed("LastWarHQ answered HTTP 503".into()))
+        );
         assert_eq!(
             reply(500, br#"{"error":{"code":"internal_error"}}"#, None),
             Err(ApiError::Failed("LastWarHQ answered internal_error".into()))

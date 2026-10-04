@@ -156,8 +156,6 @@ const DIVIDER_Y: f32 = TILES_Y + TILE_H + 24.0;
 const FOOTER_Y: f32 = DIVIDER_Y + 16.0;
 const FOOTER_H: f32 = 44.0;
 const BUTTON_W: f32 = 148.0;
-const COPY_W: f32 = 112.0;
-const BUTTON_GAP: f32 = 8.0;
 
 /// Where the update button goes, in 96-DPI pixels: x, y, width, height.
 pub const BUTTON: (f32, f32, f32, f32) = (WIDTH - MARGIN - BUTTON_W, FOOTER_Y, BUTTON_W, FOOTER_H);
@@ -167,16 +165,6 @@ pub fn row_at(x: f32, y: f32) -> Option<usize> {
     let inside =
         (MARGIN..WIDTH - MARGIN).contains(&x) && (CARD_Y..CARD_Y + ROWS * ROW_H).contains(&y);
     inside.then(|| ((y - CARD_Y) / ROW_H) as usize)
-}
-
-/// Where the Copy JSON button goes: at the right, or left of the update button when that shows.
-pub fn copy_button(update_shown: bool) -> (f32, f32, f32, f32) {
-    let right = if update_shown {
-        BUTTON.0 - BUTTON_GAP
-    } else {
-        WIDTH - MARGIN
-    };
-    (right - COPY_W, FOOTER_Y, COPY_W, FOOTER_H)
 }
 
 fn argb(rgb: u32) -> u32 {
@@ -654,7 +642,11 @@ impl Painter {
             Some(Mark::Failed) => (RED, Font::Body),
             Some(_) => (TEXT, Font::Body),
         };
-        let right = copy_button(screen.footer.button.is_some()).0 - 12.0;
+        let right = if screen.footer.button.is_some() {
+            BUTTON.0 - 12.0
+        } else {
+            WIDTH - MARGIN
+        };
         self.text(
             &screen.footer.text,
             (x, FOOTER_Y, right - x, FOOTER_H),
@@ -664,9 +656,8 @@ impl Painter {
         );
     }
 
-    /// A button filling the DC's `rect` (device pixels): solid blue if `primary`, else white
-    /// with a border.
-    pub fn button(&mut self, rect: RECT, label: &str, primary: bool, state: ButtonState) {
+    /// The update button, solid blue, filling the DC's `rect` (device pixels).
+    pub fn button(&mut self, rect: RECT, label: &str, state: ButtonState) {
         let s = self.scale;
         let (x, y) = (rect.left as f32 / s, rect.top as f32 / s);
         let (w, h) = (
@@ -674,28 +665,25 @@ impl Painter {
             (rect.bottom - rect.top) as f32 / s,
         );
         self.fill_rect(x, y, w, h, WHITE);
-        let (fill, line, ink) = match (primary, state.enabled, state.pressed) {
-            (true, false, _) => (BLUE_DISABLED, None, WHITE),
-            (true, true, true) => (BLUE_PRESSED, None, WHITE),
-            (true, true, false) => (BLUE, None, WHITE),
-            (false, false, _) => (WHITE, Some(BORDER), GREY),
-            (false, true, true) => (GREY_PALE, Some(GREY), TEXT),
-            (false, true, false) => (WHITE, Some(0xC9CED6), TEXT),
+        let fill = match (state.enabled, state.pressed) {
+            (false, _) => BLUE_DISABLED,
+            (true, true) => BLUE_PRESSED,
+            (true, false) => BLUE,
         };
-        self.rounded((x + 0.5, y + 0.5, w - 1.0, h - 1.0), 5.0, Some(fill), line);
+        self.rounded((x, y, w, h), 5.0, Some(fill), None);
         if state.focus {
             self.rounded(
                 (x + 3.0, y + 3.0, w - 6.0, h - 6.0),
                 3.0,
                 None,
-                Some(if primary { 0xBFD8F8 } else { BLUE }),
+                Some(0xBFD8F8),
             );
         }
         self.text(
             label,
             (x, y, w, h),
             Font::Button,
-            ink,
+            WHITE,
             DT_SINGLELINE | DT_VCENTER | DT_CENTER,
         );
     }

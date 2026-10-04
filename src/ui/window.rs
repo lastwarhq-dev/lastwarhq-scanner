@@ -1,8 +1,8 @@
 //! The status window: plain Win32 through hand-written declarations, no crates.
 //!
-//! One window, painted by [`paint`], with two child controls: the update and Copy JSON
-//! buttons. A one-second timer rereads the shared state, runs the weekly reset from the clock,
-//! and repaints if anything changed. All window work happens on the thread that calls [`run`].
+//! One window, painted by [`paint`], with one child control: the update button. A one-second
+//! timer rereads the shared state, runs the weekly reset from the clock, and repaints if
+//! anything changed. All window work happens on the thread that calls [`run`].
 
 #![allow(clippy::upper_case_acronyms)]
 
@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::app::export::payload_json;
 use crate::app::state::{Install, State};
 use crate::auth;
 use crate::ui::paint::{self, ButtonState, HANDLE, Painter, RECT};
@@ -121,7 +120,6 @@ unsafe extern "system" {
     fn GetDpiForSystem() -> u32;
     fn GetSystemMetrics(index: i32) -> i32;
     fn MessageBoxW(hwnd: HWND, text: *const u16, caption: *const u16, kind: u32) -> i32;
-    fn MoveWindow(hwnd: HWND, x: i32, y: i32, width: i32, height: i32, repaint: i32) -> i32;
     fn OpenClipboard(owner: HWND) -> i32;
     fn EmptyClipboard() -> i32;
     fn SetClipboardData(format: u32, data: HANDLE) -> HANDLE;
@@ -164,7 +162,6 @@ const WS_CAPTION: u32 = 0x00C0_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
 const WS_MINIMIZEBOX: u32 = 0x0002_0000;
 const WS_CHILD: u32 = 0x4000_0000;
-const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
 const BS_OWNERDRAW: u32 = 0xB;
 const WINDOW_STYLE: u32 = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
@@ -208,7 +205,6 @@ const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 
 const ID_UPDATE: usize = 200;
-const ID_COPY_JSON: usize = 201;
 const TIMER_ID: usize = 1;
 
 /// How long a note such as "Copied 97 players" stays in the footer.
@@ -226,7 +222,6 @@ struct Ui {
     window: HWND,
     /// The update button.
     button: HWND,
-    copy_button: HWND,
     scale: f32,
     /// What is painted now.
     shown: Screen,
@@ -359,34 +354,18 @@ pub fn run(shared: Arc<Mutex<State>>) -> Result<(), String> {
             instance,
             std::ptr::null_mut(),
         );
-        // Placed by `place_buttons`.
-        let copy_button = CreateWindowExW(
-            0,
-            button_class.as_ptr(),
-            no_text.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            0,
-            0,
-            0,
-            0,
-            window,
-            ID_COPY_JSON as HANDLE,
-            instance,
-            std::ptr::null_mut(),
-        );
 
         let shown = current_screen();
         UI.with(|ui| {
             *ui.borrow_mut() = Some(Ui {
                 window,
                 button,
-                copy_button,
                 scale,
                 shown: shown.clone(),
                 note: None,
             })
         });
-        place_buttons(button, copy_button, scale, &shown);
+        show_button(button, &shown);
         SetTimer(window, TIMER_ID, 1000, std::ptr::null());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
@@ -428,12 +407,9 @@ fn current_screen() -> Screen {
     screen
 }
 
-/// Shows, hides and enables the update button for `screen`, and puts the Copy JSON button
-/// beside it.
-fn place_buttons(button: HWND, copy_button: HWND, scale: f32, screen: &Screen) {
-    let px = |v: f32| (v * scale).round() as i32;
-    let (x, y, w, h) = paint::copy_button(screen.footer.button.is_some());
-    // SAFETY: both buttons belong to this thread's window.
+/// Shows, hides and enables the update button for `screen`.
+fn show_button(button: HWND, screen: &Screen) {
+    // SAFETY: the button belongs to this thread's window.
     unsafe {
         match screen.footer.button {
             Some((_, enabled)) => {
@@ -445,7 +421,6 @@ fn place_buttons(button: HWND, copy_button: HWND, scale: f32, screen: &Screen) {
                 ShowWindow(button, SW_HIDE);
             }
         }
-        MoveWindow(copy_button, px(x), px(y), px(w), px(h), 1);
     }
 }
 
@@ -461,12 +436,12 @@ fn refresh() {
             return None;
         }
         ui.shown = next.clone();
-        Some((ui.window, ui.button, ui.copy_button, ui.scale))
+        Some((ui.window, ui.button))
     });
-    if let Some((window, button, copy_button, scale)) = changed {
+    if let Some((window, button)) = changed {
         // SAFETY: the window belongs to this thread.
         unsafe { InvalidateRect(window, std::ptr::null(), 0) };
-        place_buttons(button, copy_button, scale, &next);
+        show_button(button, &next);
     }
 }
 
@@ -506,10 +481,6 @@ fn draw_button(item: &DRAWITEMSTRUCT) {
     }) else {
         return;
     };
-    let (label, primary) = match item.ctl_id as usize {
-        ID_COPY_JSON => ("Copy JSON", false),
-        _ => (label.unwrap_or(""), true),
-    };
     let s = item.item_state;
     let state = ButtonState {
         pressed: s & ODS_SELECTED != 0,
@@ -518,7 +489,7 @@ fn draw_button(item: &DRAWITEMSTRUCT) {
     };
     // SAFETY: Windows passes a DC that is valid for the whole WM_DRAWITEM call.
     let mut painter = unsafe { Painter::new(item.hdc, scale) };
-    painter.button(item.rect, label, primary, state);
+    painter.button(item.rect, label.unwrap_or(""), state);
 }
 
 /// Shows `text` in the footer for a few seconds.
@@ -573,22 +544,6 @@ fn copy_alliance_id() {
     };
     match set_clipboard(&id) {
         Ok(()) => note("Copied alliance ID".to_string(), Mark::Done),
-        Err(err) => note(format!("Copy failed: {err}"), Mark::Failed),
-    }
-}
-
-/// Copies the payload the sync will send, for checking it by hand.
-fn copy_json_clicked() {
-    let (payload, members) = {
-        let mut s = state();
-        let payload = payload_json(&mut s, now());
-        (
-            payload,
-            s.view.roster.as_ref().map_or(0, |r| r.entries.len()),
-        )
-    };
-    match set_clipboard(&payload) {
-        Ok(()) => note(format!("Copied JSON · {members} members"), Mark::Done),
         Err(err) => note(format!("Copy failed: {err}"), Mark::Failed),
     }
 }
@@ -744,7 +699,6 @@ fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
             return 1;
         }
         WM_COMMAND if wparam & 0xffff == ID_UPDATE => update_clicked(),
-        WM_COMMAND if wparam & 0xffff == ID_COPY_JSON => copy_json_clicked(),
         WM_UPDATE_DONE => {
             // SAFETY: `lparam` is the boxed result leaked by the update thread for this message.
             let result = unsafe { *Box::from_raw(lparam as *mut Result<PathBuf, String>) };

@@ -144,7 +144,10 @@ fn apply(
             }
         }
         Err(ApiError::Unauthorized) => return true,
-        Err(ApiError::TooManyRequests(secs)) => sync.next_at = Some(wait(secs)),
+        // Neither is a fault in the data: the same content goes again once the wait is over.
+        Err(ApiError::TooManyRequests(secs) | ApiError::Busy(secs)) => {
+            sync.next_at = Some(wait(secs));
+        }
         Err(ApiError::UnknownAlliance) => {
             sync.next_at = Some(answered + UNKNOWN_ALLIANCE_WAIT);
             sync.error = Some(ApiError::UnknownAlliance.to_string());
@@ -333,6 +336,29 @@ mod tests {
         assert!(
             due(&state, "b", answered + Duration::from_secs(120)),
             "a 429 is not a refusal of the content"
+        );
+    }
+
+    #[test]
+    fn a_busy_server_gets_the_same_upload_again_after_its_wait() {
+        let mut state = ready_state();
+        let answered = Instant::now();
+        let token_refused = apply(
+            &mut state.sync,
+            Err(ApiError::Busy(Some(120))),
+            sent("a"),
+            answered,
+            T,
+        );
+        assert!(!token_refused);
+        assert_eq!(
+            state.sync.error, None,
+            "nothing wrong with the data or the PC"
+        );
+        assert!(!due(&state, "a", answered + Duration::from_secs(119)));
+        assert!(
+            due(&state, "a", answered + Duration::from_secs(120)),
+            "nothing was saved, so the same content goes again"
         );
     }
 
