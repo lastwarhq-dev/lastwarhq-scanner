@@ -20,7 +20,8 @@ pub struct State {
     pub sync: SyncStatus,
 }
 
-/// Uploads to LastWarHQ. Cleared by every sign-in and sign-out.
+/// Uploads to LastWarHQ, for the view's alliance. Cleared by every sign-in and sign-out, and
+/// restarted when the view moves to another alliance (see [`SyncStatus::restart`]).
 #[derive(Debug, Default)]
 pub struct SyncStatus {
     /// When the last upload was accepted (this PC's clock), and what LastWarHQ said.
@@ -33,13 +34,29 @@ pub struct SyncStatus {
     /// The alliance fields LastWarHQ has accepted (with the value and time they were sent
     /// with), one per field; see the payload's `alliance`.
     pub alliance_sent: Vec<Seen>,
-    /// No upload before this instant (a monotonic clock, so the PC's clock changing can't
-    /// shorten a wait).
+    /// No upload before this instant: LastWarHQ's wait between uploads (a monotonic clock, so
+    /// the PC's clock changing can't shorten a wait).
     pub next_at: Option<Instant>,
+    /// After LastWarHQ said it doesn't have this alliance for the user: no upload for it
+    /// before this instant.
+    pub unknown_until: Option<Instant>,
     /// An upload is on its way.
     pub uploading: bool,
     /// Why the last upload failed.
     pub error: Option<String>,
+}
+
+impl SyncStatus {
+    /// Starts again for another alliance: what was sent, refused or said about the old one
+    /// doesn't apply to it. LastWarHQ's wait between uploads, and an upload on its way, still
+    /// do.
+    pub fn restart(&mut self) {
+        *self = SyncStatus {
+            next_at: self.next_at,
+            uploading: self.uploading,
+            ..SyncStatus::default()
+        };
+    }
 }
 
 /// Signing in to LastWarHQ. The token itself is kept only in Windows Credential Manager.
@@ -142,10 +159,13 @@ impl Identity {
 }
 
 impl State {
-    /// Records one decoded message and merges it into the view.
-    pub fn record(&mut self, message: &Message) {
+    /// Records one decoded message and merges it into the view. Returns whether it moved the
+    /// view to another account, alliance or week, forgetting the mail load: the mail is then
+    /// to be read again.
+    pub fn record(&mut self, message: &Message) -> bool {
         self.capture.messages += 1;
         self.capture.last_message = Some(message.time);
+        let mut forgot = false;
         if let Some(server) = message.server_time() {
             let offset = server.as_millis() as i64 - message.time.as_millis() as i64;
             // Network delay moves each reading by a few milliseconds; keeping the offset until
@@ -153,7 +173,7 @@ impl State {
             // steady.
             if offset.abs() <= MAX_CLOCK_OFFSET_MS {
                 match self.capture.clock_offset_ms {
-                    None => self.calibrate(offset, message.time),
+                    None => forgot = self.calibrate(offset, message.time),
                     Some(old) if (old - offset).abs() > CLOCK_STEADY_MS => {
                         self.capture.clock_offset_ms = Some(offset);
                     }
@@ -166,7 +186,11 @@ impl State {
         let time = self.game_clock(message.time);
         let before = self.identity();
         self.view.apply_at(message, time);
-        self.forget_mail_if_changed(&before);
+        // Leaving an alliance (also by switching account) restarts the sync for the next one.
+        if before.alliance.is_some() && before.alliance != self.identity().alliance {
+            self.sync.restart();
+        }
+        self.forget_mail_if_changed(&before) || forgot
     }
 
     /// A time from this PC's clock on the game server's clock, once a ping reply has shown the
@@ -179,14 +203,15 @@ impl State {
     /// ms. Everything recorded before it is on this PC's clock: it moves onto the server's,
     /// once, and the week is put right in case this PC's clock had already crossed a reset the
     /// server hasn't (mail read under the wrong week is forgotten until the next read).
-    /// Everything recorded afterwards is on the server's clock from the start.
-    fn calibrate(&mut self, offset: i64, at: Duration) {
+    /// Everything recorded afterwards is on the server's clock from the start. Returns whether
+    /// the mail load was forgotten.
+    fn calibrate(&mut self, offset: i64, at: Duration) -> bool {
         self.capture.clock_offset_ms = Some(offset);
         self.view.shift_times(offset);
         self.mail.loaded = self.mail.loaded.map(|t| shifted(t, offset));
         let before = self.identity();
         self.view.recalibrate_week(self.game_clock(at));
-        self.forget_mail_if_changed(&before);
+        self.forget_mail_if_changed(&before)
     }
 
     /// Runs the weekly reset from the clock, so it happens even when no messages arrive. `now`
@@ -239,11 +264,13 @@ impl State {
     }
 
     /// A mail load belongs to one account, alliance and week; the view drops its battles when
-    /// any of them changes, and the load status goes with them.
-    fn forget_mail_if_changed(&mut self, before: &Identity) {
-        if before.moved_on(&self.identity()) {
+    /// any of them changes, and the load status goes with them. Returns whether it did.
+    fn forget_mail_if_changed(&mut self, before: &Identity) -> bool {
+        let moved = before.moved_on(&self.identity());
+        if moved {
             self.mail = MailStatus::default();
         }
+        moved
     }
 }
 
@@ -354,6 +381,24 @@ mod tests {
         assert_eq!(state.view.ds_battles().count(), 1);
         // Another alliance's roster replaces ours: the load belonged to the old alliance.
         state.record(&roster("theirs", SATURDAY + 2));
+        assert_eq!(state.mail.loaded, None);
+    }
+
+    #[test]
+    fn switching_account_wants_the_mail_read_again() {
+        let mut state = State::default();
+        let mail_to = |uid: &str, secs| {
+            let data = obj(vec![("toUser", Value::Str(uid.into()))]);
+            Message::command_for_test("push.mail", data, secs)
+        };
+        assert!(
+            !state.record(&mail_to("7", SATURDAY)),
+            "the first account is no switch"
+        );
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY));
+        state.finish_mail_load(&started, Ok(vec![]), Duration::from_secs(SATURDAY + 1));
+        assert!(!state.record(&mail_to("7", SATURDAY + 30)));
+        assert!(state.record(&mail_to("8", SATURDAY + 60)));
         assert_eq!(state.mail.loaded, None);
     }
 

@@ -1,5 +1,6 @@
 //! Ties the parts together: live capture on a background thread, the status window in front,
-//! the mail read at start-up and every 5 minutes, and the update check.
+//! the mail read at start-up, every 5 minutes and after a switch of account, and the update
+//! check.
 
 pub mod export;
 pub mod state;
@@ -30,7 +31,8 @@ use state::{Install, State};
 /// of up to 1,514 bytes make that about 1.5 MB.
 const PACKET_QUEUE: usize = 1_024;
 
-/// How often the mail database is read.
+/// How long after a read the mail database is read again, unless a switch of account or
+/// alliance asks for a read sooner.
 const MAIL_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// How long a new version, started by an update, waits for the old one to close.
@@ -53,10 +55,12 @@ pub fn run() -> Result<(), String> {
     if updated {
         lock(&state).update.install = Install::Updated;
     }
+    // Holds at most one waiting request: more before the next read add nothing.
+    let (reread, reread_rx) = mpsc::sync_channel(1);
     {
         let state = Arc::clone(&state);
         thread::spawn(move || {
-            let result = panic::catch_unwind(AssertUnwindSafe(|| capture(&state)))
+            let result = panic::catch_unwind(AssertUnwindSafe(|| capture(&state, &reread)))
                 .unwrap_or_else(|p| Err(format!("internal error: {}", panic_text(p.as_ref()))));
             let mut s = lock(&state);
             s.capture.running = false;
@@ -71,7 +75,12 @@ pub fn run() -> Result<(), String> {
         thread::spawn(move || {
             loop {
                 load_mail(&state);
-                thread::sleep(MAIL_EVERY);
+                // A request that came in while reading is still waiting, so a read dropped for
+                // a switch during it is followed straight away by another.
+                if let Err(RecvTimeoutError::Disconnected) = reread_rx.recv_timeout(MAIL_EVERY) {
+                    // Capture has stopped, so nothing asks any more.
+                    thread::sleep(MAIL_EVERY);
+                }
             }
         });
     }
@@ -104,8 +113,9 @@ enum Event {
 }
 
 /// Captures on every usable adapter and feeds each message into the shared state. Runs until
-/// the process ends; returns only if Npcap is missing.
-fn capture(state: &Mutex<State>) -> Result<(), String> {
+/// the process ends; returns only if Npcap is missing. Asks for the mail to be read again
+/// through `reread` when a message moves the view to another account or alliance.
+fn capture(state: &Mutex<State>, reread: &SyncSender<()>) -> Result<(), String> {
     npcap::available()?;
     let filter = format!("tcp portrange {}-{}", GAME_PORTS.start(), GAME_PORTS.end());
     let (tx, rx) = mpsc::sync_channel(PACKET_QUEUE);
@@ -179,8 +189,13 @@ fn capture(state: &Mutex<State>) -> Result<(), String> {
         let mut s = lock(state);
         s.capture.server = link.map(|l| l.server.to_string());
         s.capture.last_heartbeat = link.and_then(|l| l.last_heartbeat);
+        let mut forgot = false;
         for m in messages.drain(..) {
-            s.record(&m);
+            forgot |= s.record(&m);
+        }
+        if forgot {
+            // Full means a request is already waiting.
+            let _ = reread.try_send(());
         }
     }
 }

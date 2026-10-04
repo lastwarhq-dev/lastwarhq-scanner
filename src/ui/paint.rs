@@ -618,6 +618,7 @@ impl Painter {
                 Day::Loaded => self.mark(mx, my, 13.0, Mark::Done, false),
                 Day::Today => self.mark(mx, my, 13.0, Mark::Pending, true),
                 Day::Missing => self.mark(mx, my, 13.0, Mark::Action, false),
+                Day::Gone => self.mark(mx, my, 13.0, Mark::Off, false),
                 Day::Later => self.ring(mx, my, 12.0),
             }
         }

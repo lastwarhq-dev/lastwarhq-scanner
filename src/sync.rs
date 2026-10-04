@@ -3,7 +3,8 @@
 //! minute, or what `nextSyncAfter` and `Retry-After` say).
 //!
 //! An upload needs a sign-in, a known alliance and the alliance's full member list. Whether
-//! the user manages the alliance is LastWarHQ's to say (`404 unknown_alliance`).
+//! the user manages the alliance is LastWarHQ's to say (`404 unknown_alliance`). The sync
+//! status belongs to one alliance and starts again when the view moves to another.
 //!
 //! Waits are counted on a monotonic clock from when the answer arrived, so neither a slow
 //! answer nor the PC's clock changing can shorten them.
@@ -66,6 +67,8 @@ pub fn watch(state: Arc<Mutex<State>>) {
 
 /// What an upload carried, to record once LastWarHQ has answered.
 struct Sent {
+    /// The id of the alliance it was for.
+    alliance_id: String,
     content: String,
     alliance: Vec<Seen>,
 }
@@ -81,6 +84,7 @@ fn upload_if_due(state: &Mutex<State>) {
         }
         s.sync.uploading = true;
         let sent = Sent {
+            alliance_id: s.view.alliance_id().unwrap_or_default().to_string(),
             content: built.content,
             alliance: built.alliance,
         };
@@ -100,19 +104,39 @@ fn upload_if_due(state: &Mutex<State>) {
     if s.auth.generation != generation {
         return;
     }
-    if apply(&mut s.sync, result, sent, answered, answered_at) {
+    if answer(&mut s, result, sent, answered, answered_at) {
         auth::token_refused(&mut s.auth);
         s.sync = SyncStatus::default();
     }
 }
 
+/// Records LastWarHQ's answer to an upload, as [`apply`] does. If the view has moved to
+/// another alliance meanwhile, the answer is about the old one: only the wait it asks for
+/// before the next upload is kept.
+fn answer(
+    state: &mut State,
+    result: Result<api::SyncReply, ApiError>,
+    sent: Sent,
+    answered: Instant,
+    answered_at: Duration,
+) -> bool {
+    if state.view.alliance_id() == Some(sent.alliance_id.as_str()) {
+        return apply(&mut state.sync, result, sent, answered, answered_at);
+    }
+    let mut old = SyncStatus::default();
+    let token_refused = apply(&mut old, result, sent, answered, answered_at);
+    state.sync.next_at = state.sync.next_at.max(old.next_at);
+    token_refused
+}
+
 /// Whether to upload `content` at `now`: it can be accepted, it hasn't been sent (or refused)
-/// already, and the wait LastWarHQ asked for is over.
+/// already, and the waits LastWarHQ asked for are over.
 fn due(state: &State, content: &str, now: Instant) -> bool {
     let sync = &state.sync;
     ready(state).is_ok()
         && !sync.uploading
         && sync.next_at.is_none_or(|t| now >= t)
+        && sync.unknown_until.is_none_or(|t| now >= t)
         && sync.sent.as_deref() != Some(content)
         && sync.refused.as_deref() != Some(content)
 }
@@ -136,6 +160,7 @@ fn apply(
             sync.reply = Some(reply);
             sync.sent = Some(sent.content);
             sync.refused = None;
+            sync.unknown_until = None;
             sync.error = None;
             // Accepted (applied, unchanged or stale): those fields needn't be sent again.
             for field in sent.alliance {
@@ -149,7 +174,8 @@ fn apply(
             sync.next_at = Some(wait(secs));
         }
         Err(ApiError::UnknownAlliance) => {
-            sync.next_at = Some(answered + UNKNOWN_ALLIANCE_WAIT);
+            sync.next_at = Some(wait(None));
+            sync.unknown_until = Some(answered + UNKNOWN_ALLIANCE_WAIT);
             sync.error = Some(ApiError::UnknownAlliance.to_string());
         }
         Err(refused @ ApiError::BadRequest(_)) => {
@@ -181,12 +207,16 @@ mod tests {
 
     /// The member list of alliance "ours", one member on server 901, captured at `secs`.
     fn roster(secs: u64) -> Message {
+        roster_of("ours", secs)
+    }
+
+    fn roster_of(alliance: &str, secs: u64) -> Message {
         let member = object(vec![
             ("uid", Value::Str("1".into())),
             ("serverId", Value::Int(901)),
         ]);
         let data = object(vec![
-            ("allianceId", Value::Str("ours".into())),
+            ("allianceId", Value::Str(alliance.into())),
             ("list", Value::Array(vec![member])),
         ]);
         Message::command_for_test("al.rank", data, secs)
@@ -229,6 +259,7 @@ mod tests {
 
     fn sent(content: &str) -> Sent {
         Sent {
+            alliance_id: "ours".into(),
             content: content.into(),
             alliance: Vec::new(),
         }
@@ -240,6 +271,7 @@ mod tests {
         let json = crate::util::json::parse(&built.json).unwrap();
         let alliance = json.get("alliance").unwrap().clone();
         let sent = Sent {
+            alliance_id: state.view.alliance_id().unwrap().to_string(),
             content: built.content,
             alliance: built.alliance,
         };
@@ -421,6 +453,51 @@ mod tests {
         );
         assert!(!due(&state, "a", now + MIN_GAP));
         assert!(due(&state, "a", now + UNKNOWN_ALLIANCE_WAIT));
+    }
+
+    /// Switches the view to account `uid`, whose member list is `alliance`'s, at `secs`.
+    fn switch_account(state: &mut State, uid: &str, alliance: &str, secs: u64) {
+        let mail = object(vec![("toUser", Value::Str(uid.into()))]);
+        state.record(&Message::command_for_test("push.mail", mail, secs));
+        state.record(&roster_of(alliance, secs));
+    }
+
+    #[test]
+    fn switching_to_another_alliance_starts_the_sync_again() {
+        let mut state = ready_state();
+        switch_account(&mut state, "7", "theirs", T.as_secs());
+        let now = Instant::now();
+        let mut refused = sent("a");
+        refused.alliance_id = "theirs".into();
+        answer(&mut state, Err(ApiError::UnknownAlliance), refused, now, T);
+        assert!(state.sync.error.is_some());
+        assert!(!due(&state, "a", now + MIN_GAP));
+
+        // Back to the account in the alliance LastWarHQ has: no error, and no 5-minute hold,
+        // but still a minute after the last upload.
+        switch_account(&mut state, "8", "ours", T.as_secs() + 30);
+        assert_eq!(state.sync.error, None);
+        assert!(!due(&state, "a", now + MIN_GAP - Duration::from_secs(1)));
+        assert!(due(&state, "a", now + MIN_GAP));
+    }
+
+    #[test]
+    fn an_answer_for_an_alliance_left_meanwhile_keeps_only_its_wait() {
+        let mut state = ready_state();
+        let now = Instant::now();
+        // Sent for "ours"; the account switches to "theirs" before the answer.
+        switch_account(&mut state, "8", "theirs", T.as_secs());
+        let token_refused = answer(
+            &mut state,
+            Err(ApiError::UnknownAlliance),
+            sent("a"),
+            now,
+            T,
+        );
+        assert!(!token_refused);
+        assert_eq!(state.sync.error, None);
+        assert!(!due(&state, "b", now + MIN_GAP - Duration::from_secs(1)));
+        assert!(due(&state, "b", now + MIN_GAP));
     }
 
     #[test]

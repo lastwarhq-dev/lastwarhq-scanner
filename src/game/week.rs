@@ -19,6 +19,12 @@ pub fn ds_signups_open(time: Duration) -> bool {
     vs_day(time).1 <= 5
 }
 
+/// Whether the game still shows VS day `day`'s ranking on `today` (both 1 = Monday … 7 =
+/// Sunday): on Sunday only Saturday's is shown, Monday to Friday's are gone.
+pub fn vs_ranking_shown(day: i64, today: i64) -> bool {
+    today < 7 || day == 6
+}
+
 /// Days since 1970-01-01 of the Monday that starts VS week `week`.
 pub fn monday_days(week: u64) -> u64 {
     (week * 7).saturating_sub(3)

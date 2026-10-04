@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::app::state::{AuthStatus, AuthStep, Install, State, SyncStatus, UpdateStatus};
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
-use crate::game::week::{ds_signups_open, vs_day};
+use crate::game::week::{ds_signups_open, vs_day, vs_ranking_shown};
 use crate::sync::{self, Hold};
 use crate::update::Version;
 
@@ -63,6 +63,8 @@ pub enum Day {
     Today,
     /// Over but not loaded.
     Missing,
+    /// Over, not loaded, and no longer shown in the game.
+    Gone,
     /// Later this week.
     Later,
 }
@@ -149,6 +151,8 @@ pub fn screen(state: &State, now: Duration) -> Screen {
             Day::Loaded
         } else if day == today {
             Day::Today
+        } else if day < today && !vs_ranking_shown(day, today) {
+            Day::Gone
         } else if day < today {
             Day::Missing
         } else {
@@ -457,6 +461,31 @@ mod tests {
         }
         let s = screen(&state, sunday);
         assert_eq!(s.rows[2].mark, Mark::Off);
+        assert_eq!(s.headline, "All in sync");
+    }
+
+    #[test]
+    fn on_sunday_only_saturdays_ranking_can_be_opened() {
+        let sunday = Duration::from_secs(SATURDAY + 86_400);
+        let mut state = loaded(sunday);
+        state.view.vs_days[1] = Some(empty_panel(sunday));
+        let s = screen(&state, sunday);
+        assert_eq!(
+            s.vs_days,
+            [
+                Day::Gone,
+                Day::Loaded,
+                Day::Gone,
+                Day::Gone,
+                Day::Gone,
+                Day::Missing
+            ]
+        );
+        assert_eq!(s.vs_hint.as_deref(), Some("Open the VS day tabs"));
+        // Once Saturday is in, the days that are gone don't hold back the headline.
+        state.view.vs_days[5] = Some(empty_panel(sunday));
+        let s = screen(&state, sunday);
+        assert_eq!(s.vs_hint, None);
         assert_eq!(s.headline, "All in sync");
     }
 
