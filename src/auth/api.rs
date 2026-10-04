@@ -50,8 +50,8 @@ impl fmt::Display for ApiError {
     }
 }
 
-/// `POST /v1/sync`'s answer: what happened to each section (`applied`, `unchanged`, `stale`,
-/// `pending` or `missing`), and how many seconds to wait before the next sync.
+/// `POST /v1/sync`'s answer: what happened to each section (`applied`, `unchanged`, `stale`
+/// or `missing`), and how many seconds to wait before the next sync.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SyncReply {
     pub alliance: String,
@@ -297,7 +297,7 @@ mod tests {
     fn sync_answers_say_what_happened_to_each_section() {
         let data = reply(
             200,
-            br#"{"sections":{"alliance":"applied","roster":"pending","dsSignups":"pending","dsResults":"missing","vs":["pending","pending","missing","missing","missing","missing"]},"nextSyncAfter":60}"#,
+            br#"{"sections":{"alliance":"applied","roster":"unchanged","dsSignups":"stale","dsResults":"missing","vs":["applied","unchanged","stale","missing","missing","missing"]},"nextSyncAfter":60}"#,
             None,
         )
         .unwrap();
@@ -305,11 +305,16 @@ mod tests {
             parse_sync(&data),
             SyncReply {
                 alliance: "applied".into(),
-                roster: "pending".into(),
-                ds_signups: "pending".into(),
+                roster: "unchanged".into(),
+                ds_signups: "stale".into(),
                 ds_results: "missing".into(),
                 vs: [
-                    "pending", "pending", "missing", "missing", "missing", "missing"
+                    "applied",
+                    "unchanged",
+                    "stale",
+                    "missing",
+                    "missing",
+                    "missing"
                 ]
                 .map(String::from)
                 .to_vec(),
