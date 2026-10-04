@@ -1,6 +1,6 @@
 [package]
 name = "lastwarhq-scanner"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Passive companion for the Last War: Survival PC client: alliance roster, Desert Storm and VS data as JSON"
 license = "MIT"
