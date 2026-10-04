@@ -199,7 +199,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
   },
   "dsSignups": {
     "updated": "…Z", "complete": true,
-    "players": [{ "uid": "…", "heroPower": 140000000, "chooseTimeList": [2, 1], "group": 1 }]
+    "players": [{ "uid": "…", "heroPower": 140000000, "chooseTimeList": [2, 1], "group": 1, "state": 1 }]
   },
   "dsResults": {
     "updated": "…Z",
@@ -223,7 +223,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
 | `updated` | When that panel's list arrived (UTC). |
 | `complete` | Every entry in the list could be read. When `false`, a player missing from `players` may still be on the panel. |
 | `roster` | The alliance member list. `rank` is 1–5 (R5 highest). Kept across the weekly reset. |
-| `dsSignups` | The Desert Storm participants panel, without the name and power the roster gives. `heroPower` is "Total Hero Power". `chooseTimeList`: time slots picked, in the order clicked (`1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC). `group`: team assigned, `1` = Team A, `2` = Team B, `0` = none. `null` from Saturday 02:00 UTC to the Monday reset. |
+| `dsSignups` | The Desert Storm participants panel, without the name and power the roster gives. `heroPower` is "Total Hero Power". `chooseTimeList`: time slots picked, in the order clicked (`1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC). `group`: team assigned, `1` = Team A, `2` = Team B, `0` = none. `state`: role within the team, `1` = main (20 per team), `2` = sub (10 per team), `0` = not in a team, `null` for any other value. `null` from Saturday 02:00 UTC to the Monday reset. |
 | `dsResults` | This week's battles from the result mails: when each ended, whether it was won, and each player's score. `complete: false` means a player entry in the mail couldn't be read. `null` until the mail has been read and the alliance is known. |
 | `vs` | Monday to Saturday: each completed day's VS ranking, `null` until that day's tab has been opened. The ranking lists both alliances; only our alliance's players are sent, so `players` is empty until the alliance is known. `complete` is `false` if any row of the ranking couldn't be read, or had no alliance (it might be one of ours). |
 
@@ -458,7 +458,7 @@ Sent every time the participants panel opens. `p.p.users` lists the whole allian
 | `chooseTimeList` | time slots picked, in the order clicked (1 = 11:00, 2 = 20:00, 3 = 01:00 UTC) |
 | `apply` | 1 = signed up |
 | `group` | assigned team: 1 = Team A, 2 = Team B, 0 = none |
-| `state` | within a team: 20 players have 1, 10 have 2 |
+| `state` | within a team: 1 = main (20 players), 2 = sub (10 players), 0 = not in a team |
 | `lv`, `commander`, `serverId`, `monthCardEndTime`, `pic`, `picVer` | |
 
 There is no rank field, and the list isn't in rank order.

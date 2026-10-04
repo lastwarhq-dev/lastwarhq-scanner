@@ -419,6 +419,7 @@ fn participant(u: &Value, uid: String) -> Participant {
         hero_power: int(u, "heroPower"),
         choose_time_list: int_list(u, "chooseTimeList"),
         group: int(u, "group"),
+        state: int(u, "state"),
     }
 }
 
@@ -477,6 +478,7 @@ mod tests {
                 Value::Array(vec![Value::Int(2), Value::Int(1)]),
             ),
             ("group", Value::Int(group)),
+            ("state", Value::Int(1)),
         ])
     }
 
@@ -571,6 +573,7 @@ mod tests {
                 hero_power: Some(60),
                 choose_time_list: Some(vec![2, 1]),
                 group: Some(2),
+                state: Some(1),
             }]
         );
         assert_eq!(

@@ -133,6 +133,8 @@ pub struct Participant {
     pub choose_time_list: Option<Vec<i64>>,
     /// Team assigned: 1 = Team A, 2 = Team B, 0 = none.
     pub group: Option<i64>,
+    /// Role within the team: 1 = main (20 per team), 2 = sub (10 per team), 0 = not in a team.
+    pub state: Option<i64>,
 }
 
 impl Entry for Participant {
@@ -142,7 +144,8 @@ impl Entry for Participant {
 }
 
 impl Participant {
-    /// `{"uid", "heroPower", "chooseTimeList", "group"}`
+    /// `{"uid", "heroPower", "chooseTimeList", "group", "state"}`. A `state` other than 0, 1
+    /// or 2 would get the whole upload refused, so it is sent as unknown (`null`).
     pub fn to_json(&self) -> String {
         let slots = self
             .choose_time_list
@@ -152,10 +155,11 @@ impl Participant {
                 format!("[{}]", items.join(","))
             });
         format!(
-            "{{\"uid\":{},\"heroPower\":{},\"chooseTimeList\":{slots},\"group\":{}}}",
+            "{{\"uid\":{},\"heroPower\":{},\"chooseTimeList\":{slots},\"group\":{},\"state\":{}}}",
             escape(&self.uid),
             int(count(self.hero_power)),
-            int(self.group)
+            int(self.group),
+            int(self.state.filter(|s| (0..=2).contains(s)))
         )
     }
 }
@@ -215,12 +219,30 @@ mod tests {
             uid: "9".into(),
             choose_time_list: Some(vec![2, 1, 3]),
             group: Some(0),
+            state: Some(2),
             ..Participant::default()
         };
         assert_eq!(
             participant.to_json(),
-            r#"{"uid":"9","heroPower":null,"chooseTimeList":[2,1,3],"group":0}"#
+            r#"{"uid":"9","heroPower":null,"chooseTimeList":[2,1,3],"group":0,"state":2}"#
         );
+        for (state, sent) in [
+            (None, "null"),
+            (Some(0), "0"),
+            (Some(3), "null"),
+            (Some(-1), "null"),
+        ] {
+            let participant = Participant {
+                uid: "9".into(),
+                state,
+                ..Participant::default()
+            };
+            assert!(
+                participant
+                    .to_json()
+                    .ends_with(&format!(r#""state":{sent}}}"#))
+            );
+        }
         let empty = Participant {
             uid: "9".into(),
             choose_time_list: Some(vec![]),
