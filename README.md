@@ -298,6 +298,10 @@ The exe is `target\release\lastwarhq-scanner.exe`.
 - **Static C runtime:** `.cargo/config.toml` links the C runtime into the exe
   (`+crt-static`), so it doesn't need the Visual C++ Redistributable.
 - **No Npcap SDK needed:** Npcap's `wpcap.dll` is loaded at run time.
+- **Windows resources:** `build.rs` embeds the version information (from `Cargo.toml`, shown
+  under the file's Properties → Details) and the manifest in `res/app.manifest`. It compiles
+  them with the Windows SDK's resource compiler through the `embed-resource` build dependency,
+  which runs only at build time and adds nothing to the exe's code.
 
 The exe depends on two crates directly: `etherparse` (packet headers) and `ruzstd` (zstd
 decompression), which bring in `arrayvec` and `twox-hash`. The window (Win32, drawn with GDI+

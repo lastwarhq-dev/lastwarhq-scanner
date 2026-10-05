@@ -12,3 +12,6 @@ default-run = "lastwarhq-scanner"
 [dependencies]
 etherparse = "0.21.0"
 ruzstd = "0.9.0"
+
+[build-dependencies]
+embed-resource = "3.0.11"
