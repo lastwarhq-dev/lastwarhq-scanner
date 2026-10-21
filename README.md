@@ -470,7 +470,7 @@ There is no rank field, and the list isn't in rank order.
 **`dragon.activity.info`** arrives with it. `group1` and `group2` each hold the team's
 `timeInfo` `{prepTime, battleOpenTime, endTime}`, `battleServerId`, `signUp`, `assigned` and
 `vsInfoArr`. `vsInfoArr` lists both alliances (`allianceId`, `name`, `abbr`, `strength`,
-`power`, `armyPower`); our alliance is the entry with `side: 0`.
+`power`, `armyPower`, `side`). `side: 0` is not always our alliance: the opponent can have it.
 
 **`dragon.battle.history`** is the history panel: past battles with `battleTime` (the battle's
 end), `groupM` (team), `score`, `enemyScore`, `state` (2 = won, 3 = lost), `userNum`, and the
@@ -539,8 +539,9 @@ The logged-in player's uid is taken only from messages that always describe that
 | `push.mail` | `toUser` | when new mail arrives |
 
 Name and alliance come from `get.new.user.info`, a player profile, only when its `uid` matches
-(the game also sends it for other players' profiles), and from `dragon.activity.info`
-(`side: 0`). A different uid from these messages means the user switched accounts; a different
+(the game also sends it for other players' profiles). `dragon.activity.info` gives only the
+name and tag of the alliance already known, found by its `allianceId`: `side: 0` isn't always
+ours. A different uid from these messages means the user switched accounts; a different
 alliance id for the same uid means the account moved alliance.
 
 Until one of those names the account's alliance, the member list's `allianceId` stands in for

@@ -50,9 +50,15 @@ fn text(data: &Value, key: &str) -> Option<String> {
 }
 
 impl Account {
-    /// Fills in name and alliance from messages about this account. Returns whether anything
-    /// changed.
-    pub(crate) fn absorb(&mut self, command: &str, data: &Value, time: Duration) -> bool {
+    /// Fills in name and alliance from messages about this account. `ours` is our alliance as
+    /// known so far, from the account or the member list. Returns whether anything changed.
+    pub(crate) fn absorb(
+        &mut self,
+        command: &str,
+        data: &Value,
+        time: Duration,
+        ours: Option<&str>,
+    ) -> bool {
         let before = self.clone();
         match command {
             // A player profile: ours only when the uid matches.
@@ -65,16 +71,17 @@ impl Account {
                     time,
                 );
             }
-            // Desert Storm panel: our alliance is the `side` 0 entry.
+            // Desert Storm panel: lists both alliances, and `side` 0 isn't always ours. It only
+            // gives the name and tag of the alliance already known, found by its id.
             "dragon.activity.info" => {
-                let ours = ["group1", "group2"]
+                let entry = ["group1", "group2"]
                     .iter()
                     .filter_map(|g| data.get(g)?.get("vsInfoArr")?.as_array())
                     .flatten()
-                    .find(|e| e.get("side").and_then(Value::as_i64) == Some(0));
-                if let Some(e) = ours {
+                    .find(|e| ours.is_some() && text(e, "allianceId").as_deref() == ours);
+                if let (Some(e), Some(id)) = (entry, ours) {
                     self.note_alliance(
-                        text(e, "allianceId"),
+                        Some(id.to_string()),
                         text(e, "name"),
                         text(e, "abbr"),
                         time,

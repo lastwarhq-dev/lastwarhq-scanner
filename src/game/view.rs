@@ -185,7 +185,7 @@ impl View {
         let Some(account) = self.account.as_mut() else {
             return changed;
         };
-        changed |= account.absorb(command, data, time);
+        changed |= account.absorb(command, data, time, before.as_deref());
         let after = account.alliance_id.clone();
         if before.is_some() && after.is_some() && before != after {
             self.clear(Scope::Alliance);
@@ -910,6 +910,56 @@ mod tests {
             None,
             "the old roster's alliance is gone"
         );
+    }
+
+    /// A `dragon.activity.info` whose `group1` lists `alliances` as (id, side, name, tag).
+    fn ds_activity(alliances: &[(&str, i32, &str, &str)]) -> Value {
+        let entries = alliances
+            .iter()
+            .map(|(id, side, name, abbr)| {
+                obj(vec![
+                    ("allianceId", Value::Str((*id).into())),
+                    ("side", Value::Int(*side)),
+                    ("name", Value::Str((*name).into())),
+                    ("abbr", Value::Str((*abbr).into())),
+                ])
+            })
+            .collect();
+        let group = obj(vec![("vsInfoArr", Value::Array(entries))]);
+        obj(vec![("group1", group)])
+    }
+
+    #[test]
+    fn the_desert_storm_panel_names_only_the_alliance_already_known() {
+        // The opponent is the `side` 0 entry.
+        let panel = || {
+            ds_activity(&[
+                ("theirs", 0, "Opponents", "OPP"),
+                ("ours", 1, "Example Alliance", "EXA"),
+            ])
+        };
+        let mut view = view_with_ann();
+        view.apply(&message("gold.tree.act.view", gold_tree("me"), FRIDAY));
+        view.apply(&message("dragon.activity.info", panel(), FRIDAY + 1));
+        assert_eq!(view.alliance_id(), Some("ours"));
+        let account = view.account().unwrap();
+        assert_eq!(account.alliance_name(), Some("Example Alliance"));
+        assert_eq!(account.alliance_abbr(), Some("EXA"));
+        assert_eq!(roster_uids(&view), ["1"], "our member list stays");
+        let members = roster("ours", vec![member_entry("1", "Ann", 5, 100)]);
+        view.apply(&message("al.rank", members, FRIDAY + 2));
+        assert_eq!(
+            view.roster.as_ref().unwrap().entries[0].rank,
+            Some(5),
+            "and our next member list is taken"
+        );
+
+        // Before our alliance is known, the panel can't say which entry is ours.
+        let mut view = View::default();
+        view.apply(&message("gold.tree.act.view", gold_tree("me"), FRIDAY));
+        view.apply(&message("dragon.activity.info", panel(), FRIDAY + 1));
+        assert_eq!(view.alliance_id(), None);
+        assert_eq!(view.account().unwrap().alliance_name(), None);
     }
 
     #[test]
