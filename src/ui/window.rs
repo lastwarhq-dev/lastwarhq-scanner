@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::state::{Install, State};
 use crate::auth;
+use crate::ui::log;
 use crate::ui::paint::{self, ButtonState, HANDLE, Painter, RECT};
 use crate::ui::status::{Mark, Screen, screen};
 use crate::update::{Version, install};
@@ -210,11 +211,11 @@ const TIMER_ID: usize = 1;
 /// How long a note such as "Copied 97 players" stays in the footer.
 const NOTE_TIME: Duration = Duration::from_secs(5);
 
-fn wide(s: &str) -> Vec<u16> {
+pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Shared with the window procedure, which has no other way to reach it.
+/// Shared with the window procedures, which have no other way to reach it.
 static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
 
 /// Window-thread data.
@@ -233,7 +234,7 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
-fn state() -> std::sync::MutexGuard<'static, State> {
+pub(super) fn state() -> std::sync::MutexGuard<'static, State> {
     STATE
         .get()
         .expect("state set before the window opens")
@@ -516,6 +517,19 @@ fn clickable_row(x: i32, y: i32) -> Option<usize> {
     clickable.then_some(row)
 }
 
+/// Whether the client-area point (device pixels) is on the "Debug log" link.
+fn on_debug_link(x: i32, y: i32) -> bool {
+    UI.with(|ui| {
+        ui.borrow().as_ref().is_some_and(|u| {
+            paint::on_debug_link(
+                x as f32 / u.scale,
+                y as f32 / u.scale,
+                u.shown.footer.button.is_some(),
+            )
+        })
+    })
+}
+
 /// Signs in through the browser or, after asking, signs out.
 fn sign_in_clicked() {
     let Some(window) = UI.with(|ui| ui.borrow().as_ref().map(|u| u.window)) else {
@@ -548,7 +562,7 @@ fn copy_alliance_id() {
     }
 }
 
-fn set_clipboard(text: &str) -> Result<(), &'static str> {
+pub(super) fn set_clipboard(text: &str) -> Result<(), &'static str> {
     let wide = wide(text);
     let window = UI
         .with(|ui| ui.borrow().as_ref().map(|u| u.window))
@@ -677,6 +691,7 @@ fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
             match clickable_row(x, y) {
                 Some(SIGN_IN_ROW) => sign_in_clicked(),
                 Some(ALLIANCE_ROW) => copy_alliance_id(),
+                _ if on_debug_link(x, y) => log::open(),
                 _ => {}
             }
         }
@@ -686,7 +701,8 @@ fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
             // SAFETY: `point` is a valid out-parameter; `hwnd` is this window.
             let over =
                 unsafe { GetCursorPos(&mut point) != 0 && ScreenToClient(hwnd, &mut point) != 0 }
-                    && clickable_row(point.x, point.y).is_some();
+                    && (clickable_row(point.x, point.y).is_some()
+                        || on_debug_link(point.x, point.y));
             if over {
                 // SAFETY: a system cursor, loaded and set on this thread.
                 unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND as *const u16)) };

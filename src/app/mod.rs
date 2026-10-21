@@ -2,6 +2,7 @@
 //! the mail read at start-up, every 5 minutes and after a switch of account, and the update
 //! check.
 
+pub mod debug;
 pub mod export;
 pub mod state;
 
@@ -186,12 +187,25 @@ fn capture(state: &Mutex<State>, reread: &SyncSender<()>) -> Result<(), String> 
             continue;
         }
         last_link = link;
+        // Formatted for the debug log before taking the lock, and only while it records.
+        let logged: Vec<debug::Entry> = if debug::recording() {
+            messages
+                .iter()
+                .filter_map(debug::Entry::from_message)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut s = lock(state);
         s.capture.server = link.map(|l| l.server.to_string());
         s.capture.last_heartbeat = link.and_then(|l| l.last_heartbeat);
         let mut forgot = false;
         for m in messages.drain(..) {
             forgot |= s.record(&m);
+        }
+        for mut entry in logged {
+            entry.time = s.game_clock(entry.time);
+            s.debug.push(entry);
         }
         if forgot {
             // Full means a request is already waiting.

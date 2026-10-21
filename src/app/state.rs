@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::app::debug::DebugLog;
 use crate::app::export::Seen;
 use crate::auth::api::SyncReply;
 use crate::game::battle::DsBattle;
@@ -18,6 +19,8 @@ pub struct State {
     pub update: UpdateStatus,
     pub auth: AuthStatus,
     pub sync: SyncStatus,
+    /// The messages recorded while the debug log window is open.
+    pub debug: DebugLog,
 }
 
 /// Uploads to LastWarHQ, for the view's alliance. Cleared by every sign-in and sign-out, and

@@ -160,6 +160,26 @@ const BUTTON_W: f32 = 148.0;
 /// Where the update button goes, in 96-DPI pixels: x, y, width, height.
 pub const BUTTON: (f32, f32, f32, f32) = (WIDTH - MARGIN - BUTTON_W, FOOTER_Y, BUTTON_W, FOOTER_H);
 
+const DEBUG_LINK_W: f32 = 70.0;
+
+/// The "Debug log" link in the footer, in 96-DPI pixels: at the right edge, or beside the
+/// update button while it shows.
+fn debug_link(button: bool) -> (f32, f32, f32, f32) {
+    let right = if button {
+        BUTTON.0 - 12.0
+    } else {
+        WIDTH - MARGIN
+    };
+    (right - DEBUG_LINK_W, FOOTER_Y, DEBUG_LINK_W, FOOTER_H)
+}
+
+/// Whether the 96-DPI point (x, y) is on the "Debug log" link, with the update button shown
+/// or not.
+pub fn on_debug_link(x: f32, y: f32, button: bool) -> bool {
+    let (lx, ly, lw, lh) = debug_link(button);
+    (lx..lx + lw).contains(&x) && (ly..ly + lh).contains(&y)
+}
+
 /// Which card row (0 = the first) the 96-DPI point (x, y) is on, if any.
 pub fn row_at(x: f32, y: f32) -> Option<usize> {
     let inside =
@@ -623,8 +643,17 @@ impl Painter {
             }
         }
 
-        // Footer: the version or an update, beside the update button (a child window).
+        // Footer: the version or an update, the debug log link, and the update button (a
+        // child window).
         self.fill_rect(MARGIN, DIVIDER_Y, cw, 1.0, BORDER);
+        let link = debug_link(screen.footer.button.is_some());
+        self.text(
+            "Debug log",
+            link,
+            Font::Small,
+            BLUE,
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
+        );
         let mut x = MARGIN;
         let my = FOOTER_Y + FOOTER_H / 2.0;
         match screen.footer.mark {
@@ -643,11 +672,7 @@ impl Painter {
             Some(Mark::Failed) => (RED, Font::Body),
             Some(_) => (TEXT, Font::Body),
         };
-        let right = if screen.footer.button.is_some() {
-            BUTTON.0 - 12.0
-        } else {
-            WIDTH - MARGIN
-        };
+        let right = link.0 - 12.0;
         self.text(
             &screen.footer.text,
             (x, FOOTER_Y, right - x, FOOTER_H),

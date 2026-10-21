@@ -64,7 +64,22 @@ Only one copy of the tool runs at a time.
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
-| Footer | The version, or an update (see [Updates](#updates)). |
+| Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
+
+### Debug log
+
+**Debug log** in the footer opens a second window that lists the messages the game server
+sends, for working out what a game panel carries. Each line shows the time (on the game
+server's clock, UTC), the size and the method; select one to see its data as indented JSON,
+which you can select and copy, or copy whole with **Copy**.
+
+- **Filter** shows only the messages whose method or data contains its text, in any case.
+- Messages are recorded only while the window is open; **Pause** stops and **Resume** restarts
+  the recording, and **Clear** empties the log. Closing the window stops the recording and
+  keeps what was recorded until it is cleared or the tool closes.
+- The log is kept in memory only: the newest 10,000 messages, 64 MiB of text at most, each
+  message's data cut at 4 MiB.
+- It leaves out the ping replies, SmartFox's own messages and the game's login messages.
 
 ### Signing in to LastWarHQ
 
@@ -273,7 +288,7 @@ cleared. Once the account's alliance is known, another alliance's member list is
   writes is its own exe, when you update it.
 - **No login data kept.** The game's login messages (`login.ext`, `login.other`, `init`) are
   decoded like every other message as they pass through, but nothing in them is used, kept,
-  shown or copied.
+  shown or copied. The debug log leaves them out, and SmartFox's handshake and login replies.
 - **Recovers by itself.** If the capture misses a packet, the tool gives up on the missing
   bytes after 3 seconds and carries on with what follows.
 
@@ -353,12 +368,12 @@ that can create releases. The workflow uses only GitHub's own actions (`checkout
 
 | Folder | Job |
 |---|---|
-| `src/app` | Start-up, capture loop, mail reads; shared state; the data payload |
+| `src/app` | Start-up, capture loop, mail reads; shared state; the data payload; the debug log |
 | `src/capture` | Adapter list, Npcap capture, TCP reassembly, locking on to the game connection |
 | `src/protocol` | SmartFox framing, decompression and SFSObject decoding |
 | `src/game` | The player view, account, player records, Desert Storm battles and VS week rules |
 | `src/mail` | The read-only SQLite reader and Desert Storm result mails |
-| `src/ui` | The Win32 window, what it shows, and drawing it |
+| `src/ui` | The Win32 window, what it shows, and drawing it; the debug log window |
 | `src/update` | Checking GitHub for releases; downloading, checking and swapping in the new exe |
 | `src/auth` | Signing in to LastWarHQ: browser sign-in, the scanner API, the stored token |
 | `src/net` | HTTPS through WinHTTP |
