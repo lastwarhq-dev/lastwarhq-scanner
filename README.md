@@ -63,7 +63,7 @@ Only one copy of the tool runs at a time.
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
-| Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
+| Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet, or your own server, which you shouldn't loot. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
 
@@ -92,14 +92,15 @@ and the tasks fill in as the game loads each part of it.
 
 | Part | Shows |
 |---|---|
-| Title | The server the game last loaded the world map for, and, once you have entered its map, whether it is **shiny today** (in amber), **shiny tomorrow** or **shiny in 2 days**: see [shiny days](#shiny-days). |
-| Line under it | Green: **Zoom level OK**, the game lists secret tasks as it loads the map. Red: **Zoomed out too far**; zoom in until it turns green. Grey: open the world map. |
-| Map | The 1000 × 1000 world map, north (high Y) at the top, with a line every 100 squares. The lighter green is what has been scanned since the daily reset: brighter for the last 30 minutes, darker before that; the rest is still to scan. The white frame is the part the game loaded last. A filled dot is a task that can be looted; a ring is one still in progress. Blue is SR, purple SSR, gold UR, and a larger pale gold dot with a white edge is shiny. |
-| Summary | How much of the map has been scanned, how many secret tasks have been seen (of any rarity and state), and how many shown can be looted or are in progress. |
-| List | Every task shown on the map, shiny first, then those ready: its coordinates, loots taken, and **ready** or how long until it is (**ready in 12m**). Scroll it with the mouse wheel; click one to copy its coordinates. |
+| Title | The server the game last loaded the world map for, and, once you have entered its map, whether it is **shiny today** (in amber), **shiny tomorrow** or **shiny in 2 days**: see [shiny days](#shiny-days). On your own server, **your server**, with a red **don't loot here** banner across the map. Your server is the one your base is on: the game connection's port is 10000 plus its number. |
+| Line under it | Green: **Zoom OK**, the game lists secret tasks as it loads the map. Red: **Zoomed out too far**; zoom in until it turns green. Grey: open the world map. |
+| Map | The 1000 × 1000 world map, north (high Y) at the top, with a line every 100 squares. The lighter green is what has been scanned since the daily reset: brighter for the last 30 minutes, darker before that; the rest is still to scan. The white frame is the part the game loaded last. A filled dot is a task that can be looted; a ring is one still in progress; a small grey dot is one you have looted. Blue is SR, purple SSR, gold UR, and a larger pale gold dot with a white edge is shiny. |
+| Summary | How much of the map has been scanned, how many secret tasks have been seen (of any rarity and state), how many shown you can loot or are in progress, and how many you have looted. |
+| List | Every task shown on the map, shiny first, then those ready, and those you have looted last, greyed: its rarity and level (**SSR L5**), coordinates and loots taken (**1/3**), with how long until it can be looted if it can't yet (**0/3 · in 12m**), or **by you** if you have looted it. Scroll it with the mouse wheel; click one to copy its coordinates. |
 
-- **Show shiny only** / **Show all rarities** at the top right switches between shiny tasks
-  only and all of them (the default).
+- **Shiny only** (top right) shows only shiny tasks. **Ready in 5m** under it shows only the
+  tasks you can loot now or within 5 minutes, leaving out those you have looted. Both can be on
+  at once; both are off at first.
 - The game asks for each part of the map only once while it runs, so the parts it loaded before
   the tool started aren't seen until it loads them again. Tapping a task always brings it in.
 - Tasks are remembered per server: switching servers, or between all and shiny only, keeps
@@ -113,7 +114,7 @@ and the tasks fill in as the game loads each part of it.
   when most tasks leave the map, and are kept per server. A part the game loaded before the
   tool started can count as scanned without its tasks having been seen.
 - Tasks are kept in memory only, per server, until the tool closes: their position, task id,
-  loots taken and times. Who owns or looted them is not kept.
+  loots taken, times, and whether you have looted them. Who owns or looted them is not kept.
 
 ### Signing in to LastWarHQ
 
@@ -646,13 +647,22 @@ The task id gives the rarity. The ids seen so far:
 |---|---|
 | 3xxxxx | SR, blue |
 | 4xxxxx | SSR, purple |
-| 5000xxxx, 600099xx | UR, gold |
-| other 6000xxxx | shiny gold; the two seen stayed on the map until the reset two days after the others' |
+| 5000xxxx | UR, gold |
+| 6000xxxx | shiny gold; the two seen stayed on the map until the reset two days after the others' |
+
+A `600099xx` task, gold, was one the game offered to assist rather than loot, and its id has 99
+where the others have their level. The tool takes every task id with 99 there as such a friendly
+task, and leaves it out.
 
 **`world.get.detail.new`** is the reply to tapping an object on the map. For a secret task it
 has `pointId`, `srcServer`, `cfgId`, `completionTime`, `actEndTime` and `stealInfoList`, one
 entry per loot, along with the owner and the rewards. Looting a task replies
 `hero.dispatch.steal`, with the task's `uuid` and its rarity as `color` (`4` for SSR).
+
+A task counts as looted by you when your uid is among its looters (field 4, or a
+`stealInfoList` entry), or when `hero.dispatch.steal` names its `uuid`. In every looted task
+id seen, the two digits before the last two are 4 to 7; the tool shows them as the task's
+level, and **L?** when they are over 20.
 
 ### Shiny days
 

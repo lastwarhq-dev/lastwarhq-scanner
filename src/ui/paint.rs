@@ -7,7 +7,7 @@ use std::ffi::c_void;
 
 use crate::game::tasks::{CELL, Rarity};
 use crate::ui::status::{DAY_NAMES, Day, Mark, Screen};
-use crate::ui::tasks::{MAX_LINES, TasksScreen, rarity_name};
+use crate::ui::tasks::{MAX_LINES, TasksScreen, line_name};
 
 pub type HANDLE = *mut c_void;
 
@@ -170,7 +170,9 @@ const MAP_SIDE: f32 = 400.0;
 const SUMMARY_Y: f32 = MAP_Y + MAP_SIDE + 10.0;
 const LINES_Y: f32 = SUMMARY_Y + 26.0;
 const LINE_H: f32 = 22.0;
+/// The filters: "Shiny only" beside the title, "Ready in 5m" beside the zoom line.
 const TOGGLE: (f32, f32, f32, f32) = (TASKS_WIDTH - MARGIN - 120.0, 12.0, 120.0, 30.0);
+const SOON_TOGGLE: (f32, f32, f32, f32) = (TASKS_WIDTH - MARGIN - 120.0, 45.0, 120.0, 22.0);
 
 /// The map's colours, after the game's minimap, and each rarity's.
 const MAP_BG: u32 = 0x24352B;
@@ -196,6 +198,12 @@ fn rarity_color(rarity: Rarity) -> u32 {
 /// Whether the 96-DPI point (x, y) is on the secret tasks window's "Shiny only" switch.
 pub fn on_tasks_toggle(x: f32, y: f32) -> bool {
     let (tx, ty, tw, th) = TOGGLE;
+    (tx..tx + tw).contains(&x) && (ty..ty + th).contains(&y)
+}
+
+/// Whether the 96-DPI point (x, y) is on the secret tasks window's "Ready in 5m" switch.
+pub fn on_soon_toggle(x: f32, y: f32) -> bool {
+    let (tx, ty, tw, th) = SOON_TOGGLE;
     (tx..tx + tw).contains(&x) && (ty..ty + th).contains(&y)
 }
 
@@ -601,6 +609,43 @@ impl Painter {
         });
     }
 
+    /// A checkbox and its label in `rect`: blue and ticked when `on`, an empty box when off.
+    fn checkbox(&mut self, rect: (f32, f32, f32, f32), label: &str, on: bool) {
+        let (x, y, w, h) = rect;
+        let (side, top) = (14.0, y + (h - 14.0) / 2.0);
+        if on {
+            self.rounded((x, top, side, side), 3.0, Some(BLUE), None);
+            let s = self.scale;
+            self.graphics(|g| {
+                // SAFETY: `g` is valid for this closure; the pen is deleted here.
+                unsafe {
+                    let mut pen: HANDLE = std::ptr::null_mut();
+                    if GdipCreatePen1(argb(WHITE), 2.0 * s, UNIT_PIXEL, &mut pen) == 0 {
+                        GdipSetPenStartCap(pen, LINE_CAP_ROUND);
+                        GdipSetPenEndCap(pen, LINE_CAP_ROUND);
+                        GdipSetPenLineJoin(pen, LINE_JOIN_ROUND);
+                        let p = |px: f32, py: f32| PointF {
+                            x: (x + px) * s,
+                            y: (top + py) * s,
+                        };
+                        let tick = [p(3.5, 7.5), p(6.0, 10.0), p(10.5, 4.5)];
+                        GdipDrawLines(g, pen, tick.as_ptr(), 3);
+                        GdipDeletePen(pen);
+                    }
+                }
+            });
+        } else {
+            self.rounded((x, top, side, side), 3.0, Some(WHITE), Some(GREY));
+        }
+        self.text(
+            label,
+            (x + side + 6.0, y, w - side - 6.0, h),
+            Font::Small,
+            if on { BLUE } else { TEXT_SOFT },
+            DT_SINGLELINE | DT_VCENTER,
+        );
+    }
+
     /// The outline of `rect` (96-DPI x, y, w, h), in an ARGB colour.
     fn frame(&self, rect: (f32, f32, f32, f32), color: u32, width: f32) {
         let s = self.scale;
@@ -632,18 +677,8 @@ impl Painter {
             if screen.shiny_today { AMBER_TEXT } else { TEXT },
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
-        let toggle = if screen.shiny_only {
-            "Show all rarities"
-        } else {
-            "Show shiny only"
-        };
-        self.text(
-            toggle,
-            TOGGLE,
-            Font::Small,
-            BLUE,
-            DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
-        );
+        self.checkbox(TOGGLE, "Shiny only", screen.filter.shiny_only);
+        self.checkbox(SOON_TOGGLE, "Ready in 5m", screen.filter.soon_only);
         let (dot, ink) = match screen.zoom {
             Mark::Done => (GREEN, TEXT_SOFT),
             Mark::Failed => (RED, RED),
@@ -652,7 +687,12 @@ impl Painter {
         self.circle(MARGIN + 5.0, 56.0, 5.0, Some(argb(dot)), None);
         self.text(
             &screen.zoom_text,
-            (MARGIN + 18.0, 45.0, TASKS_WIDTH - 2.0 * MARGIN - 18.0, 22.0),
+            (
+                MARGIN + 18.0,
+                45.0,
+                SOON_TOGGLE.0 - MARGIN - 18.0 - 8.0,
+                22.0,
+            ),
             Font::Body,
             ink,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
@@ -700,6 +740,11 @@ impl Painter {
             } else {
                 4.0
             };
+            // Looted by the account already: a small grey dot.
+            if marker.mine {
+                self.circle(cx, cy, 2.5, Some(argb(GREY)), None);
+                continue;
+            }
             match (marker.ready, marker.rarity) {
                 (true, Rarity::Shiny) => {
                     self.circle(cx, cy, r, Some(color), Some((argb(WHITE), 1.5)))
@@ -707,6 +752,19 @@ impl Painter {
                 (true, _) => self.circle(cx, cy, r, Some(color), None),
                 (false, _) => self.circle(cx, cy, r - 1.0, None, Some((color, 2.0))),
             }
+        }
+
+        // The account's own server isn't to be looted: a warning across the top of the map.
+        if screen.own_server {
+            let banner = (MARGIN + 12.0, MAP_Y + 12.0, MAP_SIDE - 24.0, 32.0);
+            self.rounded(banner, 6.0, Some(RED_PALE), Some(RED));
+            self.text(
+                "Your own server · don't loot here",
+                banner,
+                Font::Label,
+                RED,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER,
+            );
         }
 
         // The summary, or a note, and the tasks most worth going to.
@@ -724,25 +782,30 @@ impl Painter {
         let scroll = scroll.min(max_scroll(screen.lines.len()));
         for (i, line) in screen.lines.iter().skip(scroll).take(MAX_LINES).enumerate() {
             let y = LINES_Y + i as f32 * LINE_H;
-            let color = rarity_color(line.rarity);
+            // Looted by the account already: greyed out.
+            let (color, ink) = if line.mine {
+                (GREY, GREY)
+            } else {
+                (rarity_color(line.rarity), TEXT)
+            };
             self.circle(MARGIN + 5.0, y + LINE_H / 2.0, 5.0, Some(argb(color)), None);
             self.text(
-                rarity_name(line.rarity),
-                (MARGIN + 16.0, y, 48.0, LINE_H),
+                &line_name(line),
+                (MARGIN + 16.0, y, 74.0, LINE_H),
                 Font::Label,
-                TEXT,
+                ink,
                 DT_SINGLELINE | DT_VCENTER,
             );
             self.text(
                 &format!("X {}  Y {}", line.x, line.y),
-                (MARGIN + 66.0, y, 96.0, LINE_H),
+                (MARGIN + 92.0, y, 90.0, LINE_H),
                 Font::Body,
-                TEXT,
+                ink,
                 DT_SINGLELINE | DT_VCENTER,
             );
             self.text(
                 &line.text,
-                (MARGIN + 164.0, y, MAP_SIDE - 164.0 - SCROLLBAR_W, LINE_H),
+                (MARGIN + 184.0, y, MAP_SIDE - 184.0 - SCROLLBAR_W, LINE_H),
                 Font::Small,
                 TEXT_SOFT,
                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,

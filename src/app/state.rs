@@ -193,6 +193,8 @@ impl State {
         let before = self.identity();
         self.view.apply_at(message, time);
         if let (Some(command), Some(data)) = (message.command(), message.data()) {
+            self.world
+                .set_account(self.view.account().map(|a| a.uid.as_str()));
             self.world.apply(command, data, time);
         }
         // Leaving an alliance (also by switching account) restarts the sync for the next one.
@@ -200,6 +202,14 @@ impl State {
             self.sync.restart();
         }
         self.forget_mail_if_changed(&before) || forgot
+    }
+
+    /// The server the account's base is on: the game connection's port is 10000 plus its
+    /// number. `None` until the game connection is found.
+    pub fn home_server(&self) -> Option<u32> {
+        let address = self.capture.server.as_deref()?;
+        let port: u32 = address.rsplit(':').next()?.parse().ok()?;
+        port.checked_sub(10_000).filter(|s| *s > 0)
     }
 
     /// A time from this PC's clock on the game server's clock, once a ping reply has shown the
@@ -320,6 +330,16 @@ mod tests {
             players: vec![("1".into(), 5)],
             players_complete: true,
         }
+    }
+
+    #[test]
+    fn the_home_server_is_the_game_connection_s_port_less_10000() {
+        let mut state = State::default();
+        assert_eq!(state.home_server(), None);
+        state.capture.server = Some("203.0.113.10:10901".into());
+        assert_eq!(state.home_server(), Some(901));
+        state.capture.server = Some("[2001:db8::1]:10902".into());
+        assert_eq!(state.home_server(), Some(902));
     }
 
     #[test]

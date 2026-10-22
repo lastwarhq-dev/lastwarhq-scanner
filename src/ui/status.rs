@@ -196,7 +196,7 @@ pub fn screen(state: &State, now: Duration) -> Screen {
             sync::ready(state),
         ),
         rows,
-        tasks: tasks_row(&state.world, game_now),
+        tasks: tasks_row(&state.world, game_now, state.home_server()),
         vs_hint,
         vs_days,
         footer: footer(&state.update, Version::current()),
@@ -204,15 +204,20 @@ pub fn screen(state: &State, now: Duration) -> Screen {
 }
 
 /// The secret tasks row: the server last looked at, where it is in its shiny cycle if known,
-/// and how many shiny tasks can be looted there. A shiny day with none found yet is amber:
-/// go and scan.
-fn tasks_row(world: &World, now: Duration) -> Row {
+/// and how many shiny tasks it can loot there (not counting those it has looted). A shiny day
+/// with none found yet is amber: go and scan. The account's own server (`home`) is amber
+/// too: it isn't to be looted.
+fn tasks_row(world: &World, now: Duration, home: Option<u32>) -> Row {
     let (mark, text) = match world.last_look() {
         None => (Mark::Off, "Click to open the map".to_string()),
+        Some(look) if Some(look.server) == home => (
+            Mark::Action,
+            format!("Server {} · your server, don't loot", look.server),
+        ),
         Some(look) => {
             let shiny: Vec<&Task> = world
                 .tasks(look.server)
-                .filter(|t| t.rarity() == Rarity::Shiny && t.open(now))
+                .filter(|t| t.rarity() == Rarity::Shiny && t.open(now) && !t.mine)
                 .collect();
             let ready = shiny.iter().filter(|t| t.lootable(now)).count();
             let day = world.shiny_day(look.server, now);
@@ -789,11 +794,11 @@ mod tests {
         const HOUR: u64 = 3_600_000;
         let now = Duration::from_millis(NOW);
         let mut world = World::default();
-        assert_eq!(tasks_row(&world, now).text, "Click to open the map");
+        assert_eq!(tasks_row(&world, now, None).text, "Click to open the map");
 
         let seen = |points| block(901, 0, points);
         world.apply("world.get.block", &seen(vec![]), now);
-        let row = tasks_row(&world, now);
+        let row = tasks_row(&world, now, None);
         assert_eq!(
             (row.mark, row.text.as_str()),
             (Mark::Off, "Server 901 · no shiny seen")
@@ -805,14 +810,14 @@ mod tests {
             ("openTime".into(), Value::Long((NOW - 13 * HOUR) as i64)),
         ]);
         world.apply("get.other.server.info", &opened, now);
-        let row = tasks_row(&world, now);
+        let row = tasks_row(&world, now, None);
         assert_eq!(
             (row.mark, row.text.as_str()),
             (Mark::Action, "Server 901 · shiny today · no shiny seen")
         );
         let waiting = task_point(250, 750, 60_000_601, 0, NOW + HOUR, NOW + 51 * HOUR);
         world.apply("world.get.block", &seen(vec![waiting]), now);
-        let row = tasks_row(&world, now);
+        let row = tasks_row(&world, now, None);
         assert_eq!(
             (row.mark, row.text.as_str()),
             (
@@ -822,10 +827,16 @@ mod tests {
         );
         let ready = task_point(120, 300, 60_000_501, 2, NOW - HOUR, NOW + 51 * HOUR);
         world.apply("world.get.block", &seen(vec![ready]), now);
-        let row = tasks_row(&world, now);
+        let row = tasks_row(&world, now, None);
         assert_eq!(
             (row.mark, row.text.as_str()),
             (Mark::Done, "Server 901 · shiny today · 1 shiny to loot")
+        );
+        // The account's own server: a warning instead.
+        let row = tasks_row(&world, now, Some(901));
+        assert_eq!(
+            (row.mark, row.text.as_str()),
+            (Mark::Action, "Server 901 · your server, don't loot")
         );
     }
 }

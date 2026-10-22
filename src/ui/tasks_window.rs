@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use crate::ui::paint::{self, HANDLE, Painter, RECT};
-use crate::ui::tasks::{TasksScreen, tasks_screen};
+use crate::ui::tasks::{Filter, TasksScreen, tasks_screen};
 use crate::ui::window::{error_box, set_clipboard, state, wide};
 use crate::util::time::now;
 
@@ -156,8 +156,13 @@ struct TasksUi {
 thread_local! {
     static TASKS: RefCell<Option<TasksUi>> = const { RefCell::new(None) };
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
-    /// Whether only shiny tasks are shown; kept while the tool runs.
-    static SHINY_ONLY: Cell<bool> = const { Cell::new(false) };
+    /// Which tasks are shown; kept while the tool runs.
+    static FILTER: Cell<Filter> = const {
+        Cell::new(Filter {
+            shiny_only: false,
+            soon_only: false,
+        })
+    };
 }
 
 /// Opens the window, or brings it to the front if it is open.
@@ -254,7 +259,7 @@ fn create() -> Result<(), String> {
 fn current_screen() -> TasksScreen {
     let s = state();
     let game_now = s.game_clock(now());
-    tasks_screen(&s.world, game_now, SHINY_ONLY.get())
+    tasks_screen(&s.world, game_now, FILTER.get(), s.home_server())
 }
 
 /// Rereads the shared state and repaints if the screen changed or a note ran out. The window
@@ -320,7 +325,10 @@ fn paint_window(hwnd: HWND) {
 
 /// What a click at the client-area point (device pixels) would do.
 enum Target {
-    Toggle,
+    /// Show only shiny tasks, or all.
+    ShinyOnly,
+    /// Show only tasks ready within 5 minutes and not looted, or all.
+    SoonOnly,
     /// Copy this task line's coordinates.
     Line(u32, u32),
 }
@@ -331,7 +339,10 @@ fn target(x: i32, y: i32) -> Option<Target> {
         let ui = t.as_ref()?;
         let (x, y) = (x as f32 / ui.scale, y as f32 / ui.scale);
         if paint::on_tasks_toggle(x, y) {
-            return Some(Target::Toggle);
+            return Some(Target::ShinyOnly);
+        }
+        if paint::on_soon_toggle(x, y) {
+            return Some(Target::SoonOnly);
         }
         let line = paint::task_line_at(x, y, ui.shown.lines.len(), ui.scroll)?;
         let line = &ui.shown.lines[line];
@@ -341,8 +352,20 @@ fn target(x: i32, y: i32) -> Option<Target> {
 
 fn clicked(x: i32, y: i32) {
     match target(x, y) {
-        Some(Target::Toggle) => {
-            SHINY_ONLY.set(!SHINY_ONLY.get());
+        Some(Target::ShinyOnly) => {
+            let f = FILTER.get();
+            FILTER.set(Filter {
+                shiny_only: !f.shiny_only,
+                ..f
+            });
+            refresh();
+        }
+        Some(Target::SoonOnly) => {
+            let f = FILTER.get();
+            FILTER.set(Filter {
+                soon_only: !f.soon_only,
+                ..f
+            });
             refresh();
         }
         Some(Target::Line(x, y)) => {

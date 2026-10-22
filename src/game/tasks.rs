@@ -39,16 +39,23 @@ pub enum Rarity {
     Other,
 }
 
-/// The rarity of task `id`. Ids seen so far: SR 3xxxxx, SSR 4xxxxx, UR 5000xxxx and 600099xx,
-/// shiny the other 6000xxxx (which stay on the map until a later reset).
+/// The rarity of task `id`. Ids seen so far: SR 3xxxxx, SSR 4xxxxx, UR 5000xxxx, shiny 6000xxxx
+/// (which stay on the map until a later reset), apart from friendly tasks.
 pub fn rarity(id: u64) -> Rarity {
     match id {
+        _ if friendly(id) => Rarity::Other,
         300_000..=399_999 => Rarity::Sr,
         400_000..=499_999 => Rarity::Ssr,
-        50_000_000..=50_009_999 | 60_009_900..=60_009_999 => Rarity::Ur,
-        60_000_000..=60_009_899 => Rarity::Shiny,
+        50_000_000..=50_009_999 => Rarity::Ur,
+        60_000_000..=60_009_999 => Rarity::Shiny,
         _ => Rarity::Other,
     }
+}
+
+/// Whether task `id` is a friendly task: 99 where a looted task's id has its level (600099xx,
+/// as seen). Assisted rather than looted, so these aren't kept.
+pub fn friendly(id: u64) -> bool {
+    id / 100 % 100 == 99
 }
 
 /// A secret task as last seen. Times are on the game server's clock.
@@ -66,11 +73,22 @@ pub struct Task {
     pub ends: Duration,
     /// When it was seen.
     pub seen: Duration,
+    /// The object's `uuid` on the map, which looting it names.
+    pub uuid: Option<u64>,
+    /// Looted by the account being scanned.
+    pub mine: bool,
 }
 
 impl Task {
     pub fn rarity(&self) -> Rarity {
         rarity(self.id)
+    }
+
+    /// The task's level: the two digits before the last two of its id (5 in 400502), when
+    /// they are 1 to 20.
+    pub fn level(&self) -> Option<u32> {
+        let level = (self.id / 100 % 100) as u32;
+        (1..=20).contains(&level).then_some(level)
     }
 
     pub fn full(&self) -> bool {
@@ -177,6 +195,8 @@ pub struct World {
     /// Server → when it opened, for the servers whose maps have been visited.
     opened: HashMap<u32, Duration>,
     last: Option<Look>,
+    /// The uid of the account being scanned, if known.
+    me: Option<String>,
 }
 
 impl World {
@@ -187,10 +207,19 @@ impl World {
             "world.get.block" => self.apply_block(data, time),
             "world.get.detail.new" => self.apply_detail(data, time),
             "get.other.server.info" => self.apply_server_info(data),
+            "hero.dispatch.steal" => self.apply_loot(data),
             _ => return false,
         };
         self.prune(time);
         changed
+    }
+
+    /// The account being scanned, by uid: a task whose looters include it is marked as
+    /// looted by it.
+    pub fn set_account(&mut self, uid: Option<&str>) {
+        if self.me.as_deref() != uid {
+            self.me = uid.map(str::to_string);
+        }
     }
 
     /// The part of the map the game loaded last, on the server being viewed.
@@ -284,7 +313,8 @@ impl World {
         changed
     }
 
-    /// One map point: a task is kept, anything else clears a task the point held.
+    /// One map point: a task is kept, anything else (a friendly task included) clears a task
+    /// the point held.
     fn apply_point(&mut self, server: u32, size: u32, bytes: &[u8], time: Duration) -> bool {
         let Ok(fields) = proto::fields(bytes) else {
             return false;
@@ -296,11 +326,14 @@ impl World {
             return false;
         };
         let kind = proto::first(&fields, 2).and_then(|f| f.as_u64());
+        let uuid = proto::first(&fields, 100).and_then(|f| f.as_u64());
         let task = kind
             .filter(|k| *k == TASK_POINT)
             .and_then(|_| proto::first(&fields, 10))
             .and_then(|f| f.as_bytes())
-            .and_then(|b| task(b, x, y, time));
+            .and_then(|b| task(b, x, y, time, self.me.as_deref()))
+            .map(|task| Task { uuid, ..task })
+            .filter(|task| !friendly(task.id));
         match task {
             Some(task) => self.keep(server, point, task),
             None => self
@@ -324,6 +357,9 @@ impl World {
         let (Some(point), Some(server), Some(id), Some(loots), Some(ends)) = fields else {
             return false;
         };
+        if friendly(id as u64) {
+            return false;
+        }
         let size = self
             .last
             .as_ref()
@@ -332,6 +368,7 @@ impl World {
         let Some((x, y)) = position(point as u64, size) else {
             return false;
         };
+        let me = self.me.as_deref();
         let task = Task {
             x,
             y,
@@ -340,18 +377,49 @@ impl World {
             ready: millis(int(data, "completionTime").unwrap_or(0)),
             ends: millis(ends),
             seen: time,
+            uuid: int(data, "uuid").map(|u| u as u64),
+            mine: me.is_some_and(|me| loots.iter().any(|l| names(l, me))),
         };
         self.keep(server, point as u64, task)
     }
 
-    /// Keeps `task` at `point`, unless the limit is reached. Returns whether anything changed.
-    fn keep(&mut self, server: u32, point: u64, task: Task) -> bool {
-        let known = self
-            .servers
-            .get(&server)
-            .is_some_and(|t| t.contains_key(&point));
-        if !known && self.servers.values().map(HashMap::len).sum::<usize>() >= MAX_TASKS {
+    /// `hero.dispatch.steal`, the reply to the account looting a task: the task's `uuid`,
+    /// marked as looted by it, with the loot counted until the map shows it.
+    fn apply_loot(&mut self, data: &Value) -> bool {
+        let Some(uuid) = int(data, "uuid").map(|u| u as u64) else {
             return false;
+        };
+        let Some(task) = self
+            .servers
+            .values_mut()
+            .flat_map(|t| t.values_mut())
+            .find(|t| t.uuid == Some(uuid))
+        else {
+            return false;
+        };
+        if task.mine {
+            return false;
+        }
+        task.mine = true;
+        task.loots = (task.loots + 1).min(MAX_LOOTS);
+        true
+    }
+
+    /// Keeps `task` at `point`, unless the limit is reached. Returns whether anything changed.
+    /// A task already known as looted by the account stays so: the account's uid may not
+    /// have been known when it was seen again.
+    fn keep(&mut self, server: u32, point: u64, mut task: Task) -> bool {
+        let old = self.servers.get(&server).and_then(|t| t.get(&point));
+        if old.is_none() && self.servers.values().map(HashMap::len).sum::<usize>() >= MAX_TASKS {
+            return false;
+        }
+        let same = |old: &Task| match (old.uuid, task.uuid) {
+            (Some(a), Some(b)) => a == b,
+            _ => old.id == task.id && old.ends == task.ends,
+        };
+        if old.is_some_and(|old| old.mine && same(old)) {
+            task.mine = true;
+            task.loots = task.loots.max(1);
         }
         let tasks = self.servers.entry(server).or_default();
         let before = tasks.insert(point, task.clone());
@@ -373,10 +441,16 @@ impl World {
 }
 
 /// A task from a type-17 point's field 10: 2 the task id, 3 when it finishes, 4 once per loot
-/// (the looter), 8 when it leaves the map (times in milliseconds).
-fn task(bytes: &[u8], x: u32, y: u32, time: Duration) -> Option<Task> {
+/// (the looter's uid), 8 when it leaves the map (times in milliseconds). Looted by `me` if
+/// its uid is among the looters; the uids themselves aren't kept.
+fn task(bytes: &[u8], x: u32, y: u32, time: Duration, me: Option<&str>) -> Option<Task> {
     let fields = proto::fields(bytes).ok()?;
     let get = |n| proto::first(&fields, n).and_then(|f: Field| f.as_u64());
+    let mine = me.is_some_and(|me| {
+        fields
+            .iter()
+            .any(|(n, f)| *n == 4 && f.as_bytes() == Some(me.as_bytes()))
+    });
     Some(Task {
         x,
         y,
@@ -385,7 +459,20 @@ fn task(bytes: &[u8], x: u32, y: u32, time: Duration) -> Option<Task> {
         ready: Duration::from_millis(get(3).unwrap_or(0)),
         ends: Duration::from_millis(get(8)?),
         seen: time,
+        uuid: None,
+        mine,
     })
+}
+
+/// Whether `value` holds the string `uid` anywhere: a loot record names its looter.
+fn names(value: &Value, uid: &str) -> bool {
+    match value {
+        Value::Str(s) | Value::Text(s) => s == uid,
+        Value::StrArray(items) => items.iter().any(|s| s == uid),
+        Value::Array(items) => items.iter().any(|v| names(v, uid)),
+        Value::Object(entries) => entries.iter().any(|(_, v)| names(v, uid)),
+        _ => false,
+    }
 }
 
 /// (x, y) of point id `point` on a map `size` squares across.
@@ -419,6 +506,8 @@ pub(crate) mod tests {
     /// Monday 2026-10-19 00:00 UTC, in milliseconds.
     const DAY0: u64 = 1_792_368_000_000;
     const HOUR: u64 = 3_600_000;
+    /// The first map object uuid used in the tests.
+    pub(crate) const UUID: u64 = 1_430_000_000_000_000_000;
 
     fn obj(entries: Vec<(&str, Value)>) -> Value {
         Value::Object(entries.into_iter().map(|(k, v)| (k.into(), v)).collect())
@@ -434,18 +523,32 @@ pub(crate) mod tests {
         ready: u64,
         ends: u64,
     ) -> String {
+        let looters = vec!["1000000002000001"; loots];
+        task_point_looted_by(x, y, id, &looters, ready, ends)
+    }
+
+    /// A type-17 point like [`task_point`], looted by the players `looters`. Its uuid is
+    /// [`UUID`] plus its point id.
+    pub(crate) fn task_point_looted_by(
+        x: u64,
+        y: u64,
+        id: u64,
+        looters: &[&str],
+        ready: u64,
+        ends: u64,
+    ) -> String {
         let mut task = bytes_field(1, b"1000000001000001");
         task.extend(int_field(2, id));
         task.extend(int_field(3, ready));
-        for _ in 0..loots {
-            task.extend(bytes_field(4, b"1000000002000001"));
+        for looter in looters {
+            task.extend(bytes_field(4, looter.as_bytes()));
         }
         task.extend(int_field(8, ends));
         task.extend(bytes_field(9, b"0123456789abcdef0123456789abcdef"));
         let mut point = int_field(1, y * 1000 + x + 1);
         point.extend(int_field(2, TASK_POINT));
         point.extend(bytes_field(10, &task));
-        point.extend(int_field(100, 1_430_000_000_000_000_000));
+        point.extend(int_field(100, UUID + y * 1000 + x + 1));
         hex(&point)
     }
 
@@ -488,7 +591,8 @@ pub(crate) mod tests {
         assert_eq!(rarity(300_402), Rarity::Sr);
         assert_eq!(rarity(400_502), Rarity::Ssr);
         assert_eq!(rarity(50_000_604), Rarity::Ur);
-        assert_eq!(rarity(60_009_901), Rarity::Ur);
+        assert!(friendly(60_009_903) && friendly(50_009_901) && friendly(309_902));
+        assert!(!friendly(60_000_601) && !friendly(50_000_604) && !friendly(400_502));
         assert_eq!(rarity(60_000_501), Rarity::Shiny);
         assert_eq!(rarity(60_000_601), Rarity::Shiny);
         assert_eq!(rarity(70_000_001), Rarity::Other);
@@ -623,6 +727,98 @@ pub(crate) mod tests {
             ("srcServer", Value::Int(901)),
         ]);
         assert!(!world.apply("world.get.detail.new", &player, at(now + 6)));
+    }
+
+    #[test]
+    fn friendly_tasks_are_left_out() {
+        let mut world = World::default();
+        let now = DAY0;
+        let points = vec![
+            task_point(1, 2, 60_009_903, 1, now, now + HOUR),
+            task_point(3, 4, 50_000_701, 0, now, now + HOUR),
+        ];
+        world.apply("world.get.block", &block(901, 0, points), at(now));
+        let ids: Vec<u64> = world.tasks(901).map(|t| t.id).collect();
+        assert_eq!(ids, [50_000_701]);
+    }
+
+    #[test]
+    fn tasks_the_account_looted_are_marked() {
+        const ME: &str = "1000000003000001";
+        let mut world = World::default();
+        world.set_account(Some(ME));
+        let now = DAY0;
+        let points = vec![
+            task_point_looted_by(1, 2, 400_502, &["1000000002000001", ME], now, now + HOUR),
+            task_point(3, 4, 400_502, 2, now, now + HOUR),
+        ];
+        world.apply("world.get.block", &block(901, 0, points), at(now));
+        let mut tasks: Vec<&Task> = world.tasks(901).collect();
+        tasks.sort_by_key(|t| t.x);
+        assert_eq!((tasks[0].mine, tasks[0].loots), (true, 2));
+        assert!(!tasks[1].mine);
+
+        // Tapping a task: the loot records name the looters.
+        let record = |uid: &str| obj(vec![("uid", Value::Str(uid.into()))]);
+        let detail = obj(vec![
+            ("pointId", Value::Int(4 * 1000 + 3 + 1)),
+            ("srcServer", Value::Int(901)),
+            ("cfgId", Value::Int(400_502)),
+            ("stealInfoList", Value::Array(vec![record(ME)])),
+            ("actEndTime", Value::Long((now + HOUR) as i64)),
+        ]);
+        world.apply("world.get.detail.new", &detail, at(now + 1));
+        assert!(world.tasks(901).all(|t| t.mine));
+    }
+
+    #[test]
+    fn looting_a_task_marks_it_until_the_map_shows_the_loot() {
+        let mut world = World::default();
+        let now = DAY0;
+        let seen = |loots| {
+            block(
+                901,
+                0,
+                vec![task_point(1, 2, 400_502, loots, now, now + HOUR)],
+            )
+        };
+        world.apply("world.get.block", &seen(0), at(now));
+        let loot = obj(vec![(
+            "uuid",
+            Value::Long((UUID + 2 * 1000 + 1 + 1) as i64),
+        )]);
+        assert!(world.apply("hero.dispatch.steal", &loot, at(now + 1)));
+        let task = world.tasks(901).next().unwrap();
+        assert_eq!((task.mine, task.loots), (true, 1));
+        // Seen again while the account's uid isn't known: still looted by it.
+        world.apply("world.get.block", &seen(1), at(now + 2));
+        assert!(world.tasks(901).next().unwrap().mine);
+        // Another task's loot changes nothing.
+        let other = obj(vec![("uuid", Value::Long(5))]);
+        assert!(!world.apply("hero.dispatch.steal", &other, at(now + 3)));
+    }
+
+    #[test]
+    fn the_level_is_in_the_task_id() {
+        let level = |id| {
+            Task {
+                x: 0,
+                y: 0,
+                id,
+                loots: 0,
+                ready: Duration::ZERO,
+                ends: Duration::ZERO,
+                seen: Duration::ZERO,
+                uuid: None,
+                mine: false,
+            }
+            .level()
+        };
+        assert_eq!(level(300_402), Some(4));
+        assert_eq!(level(400_701), Some(7));
+        assert_eq!(level(50_000_502), Some(5));
+        assert_eq!(level(60_000_601), Some(6));
+        assert_eq!(level(60_009_901), None);
     }
 
     #[test]
