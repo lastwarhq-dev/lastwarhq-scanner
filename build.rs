@@ -1,5 +1,6 @@
-//! Embeds the exe's Windows resources: the version information shown under the file's
-//! Properties → Details, taken from Cargo.toml, and the application manifest in `res/`.
+//! Embeds the exe's Windows resources: its icon (`res/app.ico`, made by `res/make-icon.ps1`),
+//! the version information shown under the file's Properties → Details, taken from Cargo.toml,
+//! and the application manifest in `res/`.
 
 use std::env;
 use std::path::Path;
@@ -8,6 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=res/app.manifest");
+    println!("cargo:rerun-if-changed=res/app.ico");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -17,7 +19,8 @@ fn main() {
         var("CARGO_PKG_VERSION_MINOR"),
         var("CARGO_PKG_VERSION_PATCH"),
     );
-    let manifest = Path::new(&var("CARGO_MANIFEST_DIR")).join("res/app.manifest");
+    let res = Path::new(&var("CARGO_MANIFEST_DIR")).join("res");
+    let (icon, manifest) = (res.join("app.ico"), res.join("app.manifest"));
     let strings = [
         ("CompanyName", "lastwarhq-dev".to_string()),
         ("FileDescription", "LastWarHQ Scanner".to_string()),
@@ -37,7 +40,8 @@ fn main() {
     // 0x40004 is VOS_NT_WINDOWS32 and 1 is VFT_APP, written out so no SDK header is needed.
     // 0x0409 / 1200 is US English text in Unicode.
     let rc = format!(
-        "1 24 {manifest}
+        "1 ICON {icon}
+1 24 {manifest}
 
 1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0
@@ -60,6 +64,7 @@ BEGIN
     END
 END
 ",
+        icon = rc_string(&icon.to_string_lossy()),
         manifest = rc_string(&manifest.to_string_lossy()),
     );
     let path = Path::new(&var("OUT_DIR")).join("app.rc");
