@@ -145,12 +145,37 @@ impl Scan {
 /// the game loads as the map scrolls.
 pub const CELL: u32 = 10;
 
+/// Where a server is in its cycle of shiny tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShinyDay {
+    Today,
+    Tomorrow,
+    InTwoDays,
+}
+
+/// The day `time` falls on in server time (UTC−2), counted from 1970-01-01.
+fn server_date(time: Duration) -> u64 {
+    time.as_secs().saturating_sub(2 * 3600) / 86_400
+}
+
+/// Shiny tasks come out on every third day of a server's life, starting with the day it
+/// opened: its days 1, 4, 7 and so on, in server time.
+pub fn shiny_day(opened: Duration, now: Duration) -> ShinyDay {
+    match server_date(now).saturating_sub(server_date(opened)) % 3 {
+        0 => ShinyDay::Today,
+        1 => ShinyDay::InTwoDays,
+        _ => ShinyDay::Tomorrow,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct World {
     /// Server → point id → task.
     servers: HashMap<u32, HashMap<u64, Task>>,
     /// Server → what has been scanned.
     scans: HashMap<u32, Scan>,
+    /// Server → when it opened, for the servers whose maps have been visited.
+    opened: HashMap<u32, Duration>,
     last: Option<Look>,
 }
 
@@ -161,6 +186,7 @@ impl World {
         let changed = match command {
             "world.get.block" => self.apply_block(data, time),
             "world.get.detail.new" => self.apply_detail(data, time),
+            "get.other.server.info" => self.apply_server_info(data),
             _ => return false,
         };
         self.prune(time);
@@ -170,6 +196,24 @@ impl World {
     /// The part of the map the game loaded last, on the server being viewed.
     pub fn last_look(&self) -> Option<&Look> {
         self.last.as_ref()
+    }
+
+    /// Where `server` is in its cycle of shiny tasks at `now`, once its open time is known.
+    pub fn shiny_day(&self, server: u32, now: Duration) -> Option<ShinyDay> {
+        self.opened
+            .get(&server)
+            .map(|opened| shiny_day(*opened, now))
+    }
+
+    /// `get.other.server.info`, sent on entering another server's map: its `server` number
+    /// and `openTime` (milliseconds).
+    fn apply_server_info(&mut self, data: &Value) -> bool {
+        let server = int(data, "server").and_then(|s| u32::try_from(s).ok());
+        let opened = int(data, "openTime").filter(|t| *t > 0).map(millis);
+        let (Some(server), Some(opened)) = (server, opened) else {
+            return false;
+        };
+        self.opened.insert(server, opened) != Some(opened)
     }
 
     /// What has been scanned on `server`.
@@ -579,6 +623,36 @@ pub(crate) mod tests {
             ("srcServer", Value::Int(901)),
         ]);
         assert!(!world.apply("world.get.detail.new", &player, at(now + 6)));
+    }
+
+    #[test]
+    fn shiny_days_come_every_third_day_from_the_opening() {
+        // Opened 2025-01-01 10:00 UTC, which is that day in server time (UTC−2) too.
+        const OPENED: u64 = 1_735_725_600;
+        const DAY: u64 = 86_400;
+        let day = |secs: u64| shiny_day(Duration::from_secs(OPENED), Duration::from_secs(secs));
+        let jan_2 = OPENED - 10 * 3600 + DAY; // 2025-01-02 00:00 UTC
+        assert_eq!(day(OPENED + 3600), ShinyDay::Today);
+        // Server days start at 02:00 UTC.
+        assert_eq!(day(jan_2 + 2 * 3600 - 1), ShinyDay::Today);
+        assert_eq!(day(jan_2 + 2 * 3600), ShinyDay::InTwoDays);
+        assert_eq!(day(jan_2 + DAY + 2 * 3600), ShinyDay::Tomorrow);
+        assert_eq!(day(jan_2 + 2 * DAY + 2 * 3600), ShinyDay::Today);
+        assert_eq!(day(jan_2 + 302 * DAY + 2 * 3600), ShinyDay::Today);
+    }
+
+    #[test]
+    fn visiting_a_server_gives_its_shiny_days() {
+        let mut world = World::default();
+        let now = Duration::from_secs(1_735_725_600 + 3600);
+        assert_eq!(world.shiny_day(901, now), None);
+        let info = obj(vec![
+            ("server", Value::Int(901)),
+            ("openTime", Value::Long(1_735_725_600_000)),
+        ]);
+        assert!(world.apply("get.other.server.info", &info, now));
+        assert_eq!(world.shiny_day(901, now), Some(ShinyDay::Today));
+        assert_eq!(world.shiny_day(902, now), None);
     }
 
     #[test]

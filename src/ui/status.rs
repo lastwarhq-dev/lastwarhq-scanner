@@ -6,9 +6,10 @@ use std::time::Duration;
 use crate::app::state::{AuthStatus, AuthStep, Install, State, SyncStatus, UpdateStatus};
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
-use crate::game::tasks::{Rarity, Task, World};
+use crate::game::tasks::{Rarity, ShinyDay, Task, World};
 use crate::game::week::{ds_signups_open, vs_day, vs_ranking_shown};
 use crate::sync::{self, Hold};
+use crate::ui::tasks::shiny_text;
 use crate::update::Version;
 
 /// How something is doing, drawn as a coloured circle with a symbol.
@@ -202,7 +203,9 @@ pub fn screen(state: &State, now: Duration) -> Screen {
     }
 }
 
-/// The secret tasks row: how many shiny tasks can be looted on the server last looked at.
+/// The secret tasks row: the server last looked at, where it is in its shiny cycle if known,
+/// and how many shiny tasks can be looted there. A shiny day with none found yet is amber:
+/// go and scan.
 fn tasks_row(world: &World, now: Duration) -> Row {
     let (mark, text) = match world.last_look() {
         None => (Mark::Off, "Click to open the map".to_string()),
@@ -212,18 +215,30 @@ fn tasks_row(world: &World, now: Duration) -> Row {
                 .filter(|t| t.rarity() == Rarity::Shiny && t.open(now))
                 .collect();
             let ready = shiny.iter().filter(|t| t.lootable(now)).count();
-            let server = look.server;
-            match (ready, shiny.len()) {
-                (0, 0) => (Mark::Off, format!("No shiny seen · server {server}")),
-                (0, waiting) => (
-                    Mark::Pending,
-                    format!("{waiting} shiny in progress · server {server}"),
-                ),
-                (ready, _) => (
-                    Mark::Done,
-                    format!("{ready} shiny to loot · server {server}"),
-                ),
+            let day = world.shiny_day(look.server, now);
+            let mut text = format!("Server {}", look.server);
+            if let Some(day) = day {
+                text.push_str(&format!(" · {}", shiny_text(day)));
             }
+            let mark = match (ready, shiny.len()) {
+                (0, 0) => {
+                    text.push_str(" · no shiny seen");
+                    if day == Some(ShinyDay::Today) {
+                        Mark::Action
+                    } else {
+                        Mark::Off
+                    }
+                }
+                (0, waiting) => {
+                    text.push_str(&format!(" · {waiting} shiny in progress"));
+                    Mark::Pending
+                }
+                (ready, _) => {
+                    text.push_str(&format!(" · {ready} shiny to loot"));
+                    Mark::Done
+                }
+            };
+            (mark, text)
         }
     };
     Row {
@@ -778,20 +793,39 @@ mod tests {
 
         let seen = |points| block(901, 0, points);
         world.apply("world.get.block", &seen(vec![]), now);
-        assert_eq!(tasks_row(&world, now).mark, Mark::Off);
+        let row = tasks_row(&world, now);
+        assert_eq!(
+            (row.mark, row.text.as_str()),
+            (Mark::Off, "Server 901 · no shiny seen")
+        );
+        // Entering the server's map gives its open time: its shiny day is today, and none
+        // found yet.
+        let opened = Value::Object(vec![
+            ("server".into(), Value::Int(901)),
+            ("openTime".into(), Value::Long((NOW - 13 * HOUR) as i64)),
+        ]);
+        world.apply("get.other.server.info", &opened, now);
+        let row = tasks_row(&world, now);
+        assert_eq!(
+            (row.mark, row.text.as_str()),
+            (Mark::Action, "Server 901 · shiny today · no shiny seen")
+        );
         let waiting = task_point(250, 750, 60_000_601, 0, NOW + HOUR, NOW + 51 * HOUR);
         world.apply("world.get.block", &seen(vec![waiting]), now);
         let row = tasks_row(&world, now);
         assert_eq!(
             (row.mark, row.text.as_str()),
-            (Mark::Pending, "1 shiny in progress · server 901")
+            (
+                Mark::Pending,
+                "Server 901 · shiny today · 1 shiny in progress"
+            )
         );
         let ready = task_point(120, 300, 60_000_501, 2, NOW - HOUR, NOW + 51 * HOUR);
         world.apply("world.get.block", &seen(vec![ready]), now);
         let row = tasks_row(&world, now);
         assert_eq!(
             (row.mark, row.text.as_str()),
-            (Mark::Done, "1 shiny to loot · server 901")
+            (Mark::Done, "Server 901 · shiny today · 1 shiny to loot")
         );
     }
 }

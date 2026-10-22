@@ -170,7 +170,7 @@ const MAP_SIDE: f32 = 400.0;
 const SUMMARY_Y: f32 = MAP_Y + MAP_SIDE + 10.0;
 const LINES_Y: f32 = SUMMARY_Y + 26.0;
 const LINE_H: f32 = 22.0;
-const TOGGLE: (f32, f32, f32, f32) = (TASKS_WIDTH - MARGIN - 150.0, 12.0, 150.0, 30.0);
+const TOGGLE: (f32, f32, f32, f32) = (TASKS_WIDTH - MARGIN - 120.0, 12.0, 120.0, 30.0);
 
 /// The map's colours, after the game's minimap, and each rarity's.
 const MAP_BG: u32 = 0x24352B;
@@ -629,7 +629,7 @@ impl Painter {
             &screen.title,
             (MARGIN, 12.0, TASKS_WIDTH - 2.0 * MARGIN - TOGGLE.2, 30.0),
             Font::Label,
-            TEXT,
+            if screen.shiny_today { AMBER_TEXT } else { TEXT },
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
         let toggle = if screen.shiny_only {

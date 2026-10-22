@@ -63,7 +63,7 @@ Only one copy of the tool runs at a time.
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
-| Secret tasks | How many shiny secret tasks can be looted on the server last viewed on the world map, or how many are still in progress. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
+| Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
 
@@ -92,7 +92,7 @@ and the tasks fill in as the game loads each part of it.
 
 | Part | Shows |
 |---|---|
-| Title | The server the game last loaded the world map for. |
+| Title | The server the game last loaded the world map for, and, once you have entered its map, whether it is **shiny today** (in amber), **shiny tomorrow** or **shiny in 2 days**: see [shiny days](#shiny-days). |
 | Line under it | Green: **Zoom level OK**, the game lists secret tasks as it loads the map. Red: **Zoomed out too far**; zoom in until it turns green. Grey: open the world map. |
 | Map | The 1000 × 1000 world map, north (high Y) at the top, with a line every 100 squares. The lighter green is what has been scanned since the daily reset: brighter for the last 30 minutes, darker before that; the rest is still to scan. The white frame is the part the game loaded last. A filled dot is a task that can be looted; a ring is one still in progress. Blue is SR, purple SSR, gold UR, and a larger pale gold dot with a white edge is shiny. |
 | Summary | How much of the map has been scanned, how many secret tasks have been seen (of any rarity and state), and how many shown can be looted or are in progress. |
@@ -651,6 +651,14 @@ The task id gives the rarity. The ids seen so far:
 has `pointId`, `srcServer`, `cfgId`, `completionTime`, `actEndTime` and `stealInfoList`, one
 entry per loot, along with the owner and the rewards. Looting a task replies
 `hero.dispatch.steal`, with the task's `uuid` and its rarity as `color` (`4` for SSR).
+
+### Shiny days
+
+**`get.other.server.info`** arrives on entering another server's map: `{server, openTime}`,
+the server's number and when it opened, in milliseconds. Shiny tasks come out on every third
+day of a server's life, starting with the day it opened: its days 1, 4, 7 and so on, counted in
+server time (UTC−2). This is the rule the server list at cpt-hedge.com uses, and the shiny
+tasks seen so far fit it: they came out on one day and stayed until the reset three days later.
 
 ### Other findings
 

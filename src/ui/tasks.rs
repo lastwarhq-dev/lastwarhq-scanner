@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::game::tasks::{MAX_LOOTS, Rarity, Scan, Task, World};
+use crate::game::tasks::{MAX_LOOTS, Rarity, Scan, ShinyDay, Task, World};
 use crate::ui::status::Mark;
 
 /// Task lines shown under the map at once; the list scrolls to the rest.
@@ -13,6 +13,8 @@ pub const MAX_LINES: usize = 5;
 pub struct TasksScreen {
     /// The server being viewed, or what to do to see one.
     pub title: String,
+    /// The server being viewed has its shiny day today, so the title stands out.
+    pub shiny_today: bool,
     /// Whether the game's zoom lets secret tasks through: green, red if zoomed out too far.
     pub zoom: Mark,
     pub zoom_text: String,
@@ -63,6 +65,15 @@ pub struct TaskLine {
     pub text: String,
 }
 
+/// "shiny today", "shiny tomorrow" or "shiny in 2 days".
+pub fn shiny_text(day: ShinyDay) -> &'static str {
+    match day {
+        ShinyDay::Today => "shiny today",
+        ShinyDay::Tomorrow => "shiny tomorrow",
+        ShinyDay::InTwoDays => "shiny in 2 days",
+    }
+}
+
 pub fn rarity_name(rarity: Rarity) -> &'static str {
     match rarity {
         Rarity::Shiny => "Shiny",
@@ -106,11 +117,14 @@ pub fn tasks_screen(world: &World, now: Duration, shiny_only: bool) -> TasksScre
         (0, 0) => "none with loots left".to_string(),
         _ => format!("{ready} to loot · {waiting} in progress"),
     };
+    let shiny = look.and_then(|l| world.shiny_day(l.server, now));
     TasksScreen {
-        title: look.map_or_else(
-            || "Secret tasks".to_string(),
-            |l| format!("Server {}", l.server),
-        ),
+        title: match (look, shiny) {
+            (None, _) => "Secret tasks".to_string(),
+            (Some(l), None) => format!("Server {}", l.server),
+            (Some(l), Some(day)) => format!("Server {} · {}", l.server, shiny_text(day)),
+        },
+        shiny_today: shiny == Some(ShinyDay::Today),
         zoom,
         zoom_text,
         size: look.map_or(1000, |l| l.size),
@@ -195,6 +209,7 @@ fn wait(time: Duration) -> String {
 mod tests {
     use super::*;
     use crate::game::tasks::tests::{block, task_point};
+    use crate::protocol::sfs::Value;
 
     /// Wednesday 2026-10-21 23:00 UTC, in milliseconds.
     const NOW: u64 = 1_792_623_600_000;
@@ -279,6 +294,27 @@ mod tests {
             nothing.summary,
             "0% scanned · 0 seen · no shiny with loots left"
         );
+    }
+
+    #[test]
+    fn the_title_says_where_the_server_is_in_its_shiny_cycle() {
+        let mut world = world(0);
+        assert_eq!(tasks_screen(&world, now(), false).title, "Server 901");
+        // Opened 2 days before today in server time: shiny tomorrow.
+        let info = |opened: u64| {
+            Value::Object(vec![
+                ("server".into(), Value::Int(901)),
+                ("openTime".into(), Value::Long(opened as i64)),
+            ])
+        };
+        world.apply("get.other.server.info", &info(NOW - 50 * HOUR), now());
+        let screen = tasks_screen(&world, now(), false);
+        assert_eq!(screen.title, "Server 901 · shiny tomorrow");
+        assert!(!screen.shiny_today);
+        world.apply("get.other.server.info", &info(NOW - 3 * 24 * HOUR), now());
+        let screen = tasks_screen(&world, now(), false);
+        assert_eq!(screen.title, "Server 901 · shiny today");
+        assert!(screen.shiny_today);
     }
 
     #[test]
