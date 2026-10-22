@@ -6,6 +6,7 @@ use crate::app::debug::DebugLog;
 use crate::app::export::Seen;
 use crate::auth::api::SyncReply;
 use crate::game::battle::DsBattle;
+use crate::game::tasks::World;
 use crate::game::view::View;
 use crate::protocol::message::Message;
 use crate::update::Version;
@@ -21,6 +22,8 @@ pub struct State {
     pub sync: SyncStatus,
     /// The messages recorded while the debug log window is open.
     pub debug: DebugLog,
+    /// The secret tasks seen on the world map.
+    pub world: World,
 }
 
 /// Uploads to LastWarHQ, for the view's alliance. Cleared by every sign-in and sign-out, and
@@ -189,6 +192,9 @@ impl State {
         let time = self.game_clock(message.time);
         let before = self.identity();
         self.view.apply_at(message, time);
+        if let (Some(command), Some(data)) = (message.command(), message.data()) {
+            self.world.apply(command, data, time);
+        }
         // Leaving an alliance (also by switching account) restarts the sync for the next one.
         if before.alliance.is_some() && before.alliance != self.identity().alliance {
             self.sync.restart();

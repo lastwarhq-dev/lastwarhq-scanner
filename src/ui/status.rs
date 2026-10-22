@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::app::state::{AuthStatus, AuthStep, Install, State, SyncStatus, UpdateStatus};
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
+use crate::game::tasks::{Rarity, Task, World};
 use crate::game::week::{ds_signups_open, vs_day, vs_ranking_shown};
 use crate::sync::{self, Hold};
 use crate::update::Version;
@@ -41,6 +42,9 @@ pub struct Screen {
     pub sign_in: Row,
     /// Alliance, roster, DS sign-ups and DS results.
     pub rows: [Row; 4],
+    /// The secret tasks seen on the world map, below the data rows; clicking it opens the
+    /// map. It doesn't count towards the headline either.
+    pub tasks: Row,
     /// What to do about missing VS days, if any are missing.
     pub vs_hint: Option<String>,
     /// Monday to Saturday.
@@ -191,9 +195,41 @@ pub fn screen(state: &State, now: Duration) -> Screen {
             sync::ready(state),
         ),
         rows,
+        tasks: tasks_row(&state.world, game_now),
         vs_hint,
         vs_days,
         footer: footer(&state.update, Version::current()),
+    }
+}
+
+/// The secret tasks row: how many shiny tasks can be looted on the server last looked at.
+fn tasks_row(world: &World, now: Duration) -> Row {
+    let (mark, text) = match world.last_look() {
+        None => (Mark::Off, "Click to open the map".to_string()),
+        Some(look) => {
+            let shiny: Vec<&Task> = world
+                .tasks(look.server)
+                .filter(|t| t.rarity() == Rarity::Shiny && t.open(now))
+                .collect();
+            let ready = shiny.iter().filter(|t| t.lootable(now)).count();
+            let server = look.server;
+            match (ready, shiny.len()) {
+                (0, 0) => (Mark::Off, format!("No shiny seen · server {server}")),
+                (0, waiting) => (
+                    Mark::Pending,
+                    format!("{waiting} shiny in progress · server {server}"),
+                ),
+                (ready, _) => (
+                    Mark::Done,
+                    format!("{ready} shiny to loot · server {server}"),
+                ),
+            }
+        }
+    };
+    Row {
+        label: "Secret tasks",
+        mark,
+        text,
     }
 }
 
@@ -728,5 +764,34 @@ mod tests {
             ..UpdateStatus::default()
         };
         assert_eq!(footer(&update, current).button, None);
+    }
+
+    #[test]
+    fn the_tasks_row_counts_shiny_tasks_to_loot() {
+        use crate::game::tasks::tests::{block, task_point};
+        // Wednesday 2026-10-21 23:00 UTC.
+        const NOW: u64 = 1_792_623_600_000;
+        const HOUR: u64 = 3_600_000;
+        let now = Duration::from_millis(NOW);
+        let mut world = World::default();
+        assert_eq!(tasks_row(&world, now).text, "Click to open the map");
+
+        let seen = |points| block(901, 0, points);
+        world.apply("world.get.block", &seen(vec![]), now);
+        assert_eq!(tasks_row(&world, now).mark, Mark::Off);
+        let waiting = task_point(250, 750, 60_000_601, 0, NOW + HOUR, NOW + 51 * HOUR);
+        world.apply("world.get.block", &seen(vec![waiting]), now);
+        let row = tasks_row(&world, now);
+        assert_eq!(
+            (row.mark, row.text.as_str()),
+            (Mark::Pending, "1 shiny in progress · server 901")
+        );
+        let ready = task_point(120, 300, 60_000_501, 2, NOW - HOUR, NOW + 51 * HOUR);
+        world.apply("world.get.block", &seen(vec![ready]), now);
+        let row = tasks_row(&world, now);
+        assert_eq!(
+            (row.mark, row.text.as_str()),
+            (Mark::Done, "1 shiny to loot · server 901")
+        );
     }
 }

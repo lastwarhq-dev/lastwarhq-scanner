@@ -63,6 +63,7 @@ Only one copy of the tool runs at a time.
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
+| Secret tasks | How many shiny secret tasks can be looted on the server last viewed on the world map, or how many are still in progress. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
 
@@ -80,6 +81,39 @@ which you can select and copy, or copy whole with **Copy**.
 - The log is kept in memory only: the newest 10,000 messages, 64 MiB of text at most, each
   message's data cut at 4 MiB.
 - It leaves out the ping replies, SmartFox's own messages and the game's login messages.
+- Byte arrays are shown as strings of hex digits, and numbers without their type, so a byte
+  array and a string of hex digits look the same.
+
+### Secret tasks
+
+Clicking the **Secret tasks** row opens a map of the secret tasks on the world map that still
+have loots left, on the server you are viewing in the game. Scroll the world map in the game
+and the tasks fill in as the game loads each part of it.
+
+| Part | Shows |
+|---|---|
+| Title | The server the game last loaded the world map for. |
+| Line under it | Green: **Zoom level OK**, the game lists secret tasks as it loads the map. Red: **Zoomed out too far**; zoom in until it turns green. Grey: open the world map. |
+| Map | The 1000 × 1000 world map, north (high Y) at the top, with a line every 100 squares. The lighter green is what has been scanned since the daily reset: brighter for the last 30 minutes, darker before that; the rest is still to scan. The white frame is the part the game loaded last. A filled dot is a task that can be looted; a ring is one still in progress. Blue is SR, purple SSR, gold UR, and a larger pale gold dot with a white edge is shiny. |
+| Summary | How much of the map has been scanned, how many secret tasks have been seen (of any rarity and state), and how many shown can be looted or are in progress. |
+| List | Every task shown on the map, shiny first, then those ready: its coordinates, loots taken, and **ready** or how long until it is (**ready in 12m**). Scroll it with the mouse wheel; click one to copy its coordinates. |
+
+- **Show shiny only** / **Show all rarities** at the top right switches between shiny tasks
+  only and all of them (the default).
+- The game asks for each part of the map only once while it runs, so the parts it loaded before
+  the tool started aren't seen until it loads them again. Tapping a task always brings it in.
+- Tasks are remembered per server: switching servers, or between all and shiny only, keeps
+  what was seen.
+- A task drops off once it has been looted 3 times or has left the map. The loot count is as of
+  the last time the game loaded that part of the map; scroll back over it, or tap it in the
+  game, to bring it up to date.
+- The furthest-out zoom that stays green loads the largest area at a time.
+- The map is scanned in 10 × 10-square cells: a cell counts as scanned once the game loads an
+  area covering it at a zoom that stays green. Scans start again at the 02:00 UTC daily reset,
+  when most tasks leave the map, and are kept per server. A part the game loaded before the
+  tool started can count as scanned without its tasks having been seen.
+- Tasks are kept in memory only, per server, until the tool closes: their position, task id,
+  loots taken and times. Who owns or looted them is not kept.
 
 ### Signing in to LastWarHQ
 
@@ -370,10 +404,10 @@ that can create releases. The workflow uses only GitHub's own actions (`checkout
 |---|---|
 | `src/app` | Start-up, capture loop, mail reads; shared state; the data payload; the debug log |
 | `src/capture` | Adapter list, Npcap capture, TCP reassembly, locking on to the game connection |
-| `src/protocol` | SmartFox framing, decompression and SFSObject decoding |
-| `src/game` | The player view, account, player records, Desert Storm battles and VS week rules |
+| `src/protocol` | SmartFox framing, decompression and SFSObject decoding; protobuf reading |
+| `src/game` | The player view, account, player records, Desert Storm battles and VS week rules; secret tasks |
 | `src/mail` | The read-only SQLite reader and Desert Storm result mails |
-| `src/ui` | The Win32 window, what it shows, and drawing it; the debug log window |
+| `src/ui` | The Win32 window, what it shows, and drawing it; the debug log and secret tasks windows |
 | `src/update` | Checking GitHub for releases; downloading, checking and swapping in the new exe |
 | `src/auth` | Signing in to LastWarHQ: browser sign-in, the scanner API, the stored token |
 | `src/net` | HTTPS through WinHTTP |
@@ -572,6 +606,51 @@ known, member lists from other alliances are ignored.
 - Today's VS ranking is skipped until the day ends.
 - From Saturday, the participants panel lists the alliance with empty `chooseTimeList` and no
   other sign-up fields; see [Desert Storm sign-ups](#desert-storm-sign-ups).
+
+### World map: secret tasks
+
+**`world.get.block`** is the reply each time the game loads part of the world map.
+`serverPointArr` holds one entry per server, with:
+
+| Key | Contents |
+|---|---|
+| `serverId` | the server whose map this is |
+| `maxAreaSize` | the map's side in squares: 1000 |
+| `leftBottom`, `rightTop` | the corners of the area loaded, as point ids |
+| `viewLvl` | the zoom: 0 when zoomed in; further out, 1, and then no secret tasks are listed |
+| `points` | one byte array per object on the map, each a protobuf message (the debug log shows byte arrays as hex) |
+
+A point id numbers the squares row by row from 1: `id − 1 = y × 1000 + x`. As the map is
+scrolled, a load can list only the newly shown columns of its area; an area already loaded
+isn't sent again.
+
+Each point's protobuf message has field 1, its point id; field 2, its type; and field 100, the
+object's `uuid`. Type 6 is a player base and type 17 a secret task. A secret task's field 10 is
+a message holding:
+
+| Field | Contents |
+|---|---|
+| 1 | the owner's uid |
+| 2 | the task id (`cfgId`) |
+| 3 | when the task finishes, in milliseconds; it can't be looted before |
+| 4 | once per loot, the looter's uid; a task can be looted 3 times |
+| 6 | the heroes sent, packed |
+| 8 | when it leaves the map, in milliseconds |
+| 9 | the owner's alliance id |
+
+The task id gives the rarity. The ids seen so far:
+
+| Task ids | Rarity |
+|---|---|
+| 3xxxxx | SR, blue |
+| 4xxxxx | SSR, purple |
+| 5000xxxx, 600099xx | UR, gold |
+| other 6000xxxx | shiny gold; the two seen stayed on the map until the reset two days after the others' |
+
+**`world.get.detail.new`** is the reply to tapping an object on the map. For a secret task it
+has `pointId`, `srcServer`, `cfgId`, `completionTime`, `actEndTime` and `stealInfoList`, one
+entry per loot, along with the owner and the rewards. Looting a task replies
+`hero.dispatch.steal`, with the task's `uuid` and its rarity as `color` (`4` for SSR).
 
 ### Other findings
 

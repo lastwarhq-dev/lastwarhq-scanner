@@ -5,7 +5,9 @@
 
 use std::ffi::c_void;
 
+use crate::game::tasks::{CELL, Rarity};
 use crate::ui::status::{DAY_NAMES, Day, Mark, Screen};
+use crate::ui::tasks::{MAX_LINES, TasksScreen, rarity_name};
 
 pub type HANDLE = *mut c_void;
 
@@ -146,7 +148,7 @@ const MARGIN: f32 = 16.0;
 const HEADER_Y: f32 = 22.0;
 const BADGE: f32 = 68.0;
 const CARD_Y: f32 = 114.0;
-const ROWS: f32 = 5.0;
+const ROWS: f32 = 6.0;
 const ROW_H: f32 = 54.0;
 const VS_Y: f32 = CARD_Y + ROWS * ROW_H + 24.0;
 const TILES_Y: f32 = VS_Y + 34.0;
@@ -159,6 +161,60 @@ const BUTTON_W: f32 = 148.0;
 
 /// Where the update button goes, in 96-DPI pixels: x, y, width, height.
 pub const BUTTON: (f32, f32, f32, f32) = (WIDTH - MARGIN - BUTTON_W, FOOTER_Y, BUTTON_W, FOOTER_H);
+
+/// The secret tasks window's layout, in 96-DPI pixels.
+pub const TASKS_WIDTH: f32 = MAP_SIDE + 2.0 * MARGIN;
+pub const TASKS_HEIGHT: f32 = LINES_Y + MAX_LINES as f32 * LINE_H + 10.0;
+const MAP_Y: f32 = 76.0;
+const MAP_SIDE: f32 = 400.0;
+const SUMMARY_Y: f32 = MAP_Y + MAP_SIDE + 10.0;
+const LINES_Y: f32 = SUMMARY_Y + 26.0;
+const LINE_H: f32 = 22.0;
+const TOGGLE: (f32, f32, f32, f32) = (TASKS_WIDTH - MARGIN - 150.0, 12.0, 150.0, 30.0);
+
+/// The map's colours, after the game's minimap, and each rarity's.
+const MAP_BG: u32 = 0x24352B;
+const MAP_GRID: u32 = 0x2F4537;
+/// Scanned in the last half hour, and earlier since the reset.
+const MAP_SCANNED: u32 = 0x4A7458;
+const MAP_SCANNED_OLD: u32 = 0x34503F;
+const SR_BLUE: u32 = 0x3B82F6;
+const SSR_PURPLE: u32 = 0xA855F7;
+const UR_GOLD: u32 = 0xF59E0B;
+const SHINY_GOLD: u32 = 0xFDE047;
+
+fn rarity_color(rarity: Rarity) -> u32 {
+    match rarity {
+        Rarity::Shiny => SHINY_GOLD,
+        Rarity::Ur => UR_GOLD,
+        Rarity::Ssr => SSR_PURPLE,
+        Rarity::Sr => SR_BLUE,
+        Rarity::Other => GREY,
+    }
+}
+
+/// Whether the 96-DPI point (x, y) is on the secret tasks window's "Shiny only" switch.
+pub fn on_tasks_toggle(x: f32, y: f32) -> bool {
+    let (tx, ty, tw, th) = TOGGLE;
+    (tx..tx + tw).contains(&x) && (ty..ty + th).contains(&y)
+}
+
+/// Which of `count` task lines, scrolled `scroll` lines down, the 96-DPI point (x, y) is on,
+/// if any.
+pub fn task_line_at(x: f32, y: f32, count: usize, scroll: usize) -> Option<usize> {
+    let inside = (MARGIN..TASKS_WIDTH - MARGIN - SCROLLBAR_W).contains(&x) && y >= LINES_Y;
+    let shown = ((y - LINES_Y) / LINE_H) as usize;
+    let line = scroll.min(max_scroll(count)) + shown;
+    (inside && shown < MAX_LINES && line < count).then_some(line)
+}
+
+/// How far a list of `count` task lines can scroll.
+pub fn max_scroll(count: usize) -> usize {
+    count.saturating_sub(MAX_LINES)
+}
+
+/// Room kept beside the task lines for the scrollbar.
+const SCROLLBAR_W: f32 = 10.0;
 
 const DEBUG_LINK_W: f32 = 70.0;
 
@@ -519,6 +575,190 @@ impl Painter {
         });
     }
 
+    /// A circle of radius `r` around (cx, cy), filled and outlined (colour, width) in ARGB
+    /// colours, if given.
+    fn circle(&self, cx: f32, cy: f32, r: f32, fill: Option<u32>, line: Option<(u32, f32)>) {
+        let s = self.scale;
+        let (cx, cy, r) = (cx * s, cy * s, r * s);
+        self.graphics(|g| {
+            // SAFETY: `g` is valid for this closure; every object made here is deleted here.
+            unsafe {
+                if let Some(fill) = fill {
+                    let mut brush: HANDLE = std::ptr::null_mut();
+                    if GdipCreateSolidFill(fill, &mut brush) == 0 {
+                        GdipFillEllipse(g, brush, cx - r, cy - r, 2.0 * r, 2.0 * r);
+                        GdipDeleteBrush(brush);
+                    }
+                }
+                if let Some((color, width)) = line {
+                    let mut pen: HANDLE = std::ptr::null_mut();
+                    if GdipCreatePen1(color, width * s, UNIT_PIXEL, &mut pen) == 0 {
+                        GdipDrawEllipse(g, pen, cx - r, cy - r, 2.0 * r, 2.0 * r);
+                        GdipDeletePen(pen);
+                    }
+                }
+            }
+        });
+    }
+
+    /// The outline of `rect` (96-DPI x, y, w, h), in an ARGB colour.
+    fn frame(&self, rect: (f32, f32, f32, f32), color: u32, width: f32) {
+        let s = self.scale;
+        let (x, y, w, h) = (rect.0 * s, rect.1 * s, rect.2 * s, rect.3 * s);
+        self.graphics(|g| {
+            // SAFETY: `g` is valid for this closure; the pen is deleted here.
+            unsafe {
+                let mut pen: HANDLE = std::ptr::null_mut();
+                if GdipCreatePen1(color, width * s, UNIT_PIXEL, &mut pen) == 0 {
+                    let p = |x, y| PointF { x, y };
+                    let corners = [p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h), p(x, y)];
+                    GdipDrawLines(g, pen, corners.as_ptr(), corners.len() as i32);
+                    GdipDeletePen(pen);
+                }
+            }
+        });
+    }
+
+    /// The secret tasks window, onto a DC the size of its client area. `note` replaces the
+    /// summary for a moment, after a click; the list starts `scroll` lines down.
+    pub fn tasks(&mut self, screen: &TasksScreen, note: Option<&str>, scroll: usize) {
+        self.fill_rect(0.0, 0.0, TASKS_WIDTH, TASKS_HEIGHT, WHITE);
+
+        // The server, the "Shiny only" switch, and the zoom with its dot.
+        self.text(
+            &screen.title,
+            (MARGIN, 12.0, TASKS_WIDTH - 2.0 * MARGIN - TOGGLE.2, 30.0),
+            Font::Label,
+            TEXT,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        let toggle = if screen.shiny_only {
+            "Show all rarities"
+        } else {
+            "Show shiny only"
+        };
+        self.text(
+            toggle,
+            TOGGLE,
+            Font::Small,
+            BLUE,
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
+        );
+        let (dot, ink) = match screen.zoom {
+            Mark::Done => (GREEN, TEXT_SOFT),
+            Mark::Failed => (RED, RED),
+            _ => (GREY, TEXT_SOFT),
+        };
+        self.circle(MARGIN + 5.0, 56.0, 5.0, Some(argb(dot)), None);
+        self.text(
+            &screen.zoom_text,
+            (MARGIN + 18.0, 45.0, TASKS_WIDTH - 2.0 * MARGIN - 18.0, 22.0),
+            Font::Body,
+            ink,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+
+        // The map: north (the highest y) at the top, with a line every tenth of the way.
+        self.rounded((MARGIN, MAP_Y, MAP_SIDE, MAP_SIDE), 6.0, Some(MAP_BG), None);
+        let size = screen.size.max(1) as f32;
+        let cell = CELL as f32 / size * MAP_SIDE;
+        for run in &screen.scanned {
+            let color = if run.fresh {
+                MAP_SCANNED
+            } else {
+                MAP_SCANNED_OLD
+            };
+            // Rows count up from the bottom; the last row and column may be cut short.
+            let bottom = MAP_Y + MAP_SIDE - run.row as f32 * cell;
+            let top = (bottom - cell).max(MAP_Y);
+            let left = MARGIN + run.from as f32 * cell;
+            let right = (MARGIN + run.to as f32 * cell).min(MARGIN + MAP_SIDE);
+            self.fill_rect(left, top, right - left, bottom - top, color);
+        }
+        for i in 1..10 {
+            let at = i as f32 * MAP_SIDE / 10.0;
+            self.fill_rect(MARGIN + at, MAP_Y + 4.0, 1.0, MAP_SIDE - 8.0, MAP_GRID);
+            self.fill_rect(MARGIN + 4.0, MAP_Y + at, MAP_SIDE - 8.0, 1.0, MAP_GRID);
+        }
+        let to_x = |x: f32| MARGIN + x / size * MAP_SIDE;
+        let to_y = |y: f32| MAP_Y + (1.0 - y / size) * MAP_SIDE;
+        if let Some((left, bottom, right, top)) = screen.area {
+            let (x0, x1) = (to_x(left as f32), to_x(right as f32 + 1.0));
+            let (y0, y1) = (to_y(top as f32 + 1.0), to_y(bottom as f32));
+            self.frame(
+                (x0, y0, (x1 - x0).max(2.0), (y1 - y0).max(2.0)),
+                0xC0FF_FFFF,
+                1.5,
+            );
+        }
+        // Rarer tasks are drawn last, on top.
+        for marker in screen.markers.iter().rev() {
+            let (cx, cy) = (to_x(marker.x as f32 + 0.5), to_y(marker.y as f32 + 0.5));
+            let color = argb(rarity_color(marker.rarity));
+            let r = if marker.rarity == Rarity::Shiny {
+                6.0
+            } else {
+                4.0
+            };
+            match (marker.ready, marker.rarity) {
+                (true, Rarity::Shiny) => {
+                    self.circle(cx, cy, r, Some(color), Some((argb(WHITE), 1.5)))
+                }
+                (true, _) => self.circle(cx, cy, r, Some(color), None),
+                (false, _) => self.circle(cx, cy, r - 1.0, None, Some((color, 2.0))),
+            }
+        }
+
+        // The summary, or a note, and the tasks most worth going to.
+        let (summary, color) = match note {
+            Some(note) => (note, GREEN_TEXT),
+            None => (screen.summary.as_str(), TEXT),
+        };
+        self.text(
+            summary,
+            (MARGIN, SUMMARY_Y, MAP_SIDE, 24.0),
+            Font::Body,
+            color,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        let scroll = scroll.min(max_scroll(screen.lines.len()));
+        for (i, line) in screen.lines.iter().skip(scroll).take(MAX_LINES).enumerate() {
+            let y = LINES_Y + i as f32 * LINE_H;
+            let color = rarity_color(line.rarity);
+            self.circle(MARGIN + 5.0, y + LINE_H / 2.0, 5.0, Some(argb(color)), None);
+            self.text(
+                rarity_name(line.rarity),
+                (MARGIN + 16.0, y, 48.0, LINE_H),
+                Font::Label,
+                TEXT,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+            self.text(
+                &format!("X {}  Y {}", line.x, line.y),
+                (MARGIN + 66.0, y, 96.0, LINE_H),
+                Font::Body,
+                TEXT,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+            self.text(
+                &line.text,
+                (MARGIN + 164.0, y, MAP_SIDE - 164.0 - SCROLLBAR_W, LINE_H),
+                Font::Small,
+                TEXT_SOFT,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+        // A scrollbar when there are more lines than fit: the thumb shows which are in view.
+        let count = screen.lines.len();
+        if count > MAX_LINES {
+            let (x, height) = (TASKS_WIDTH - MARGIN - 4.0, MAX_LINES as f32 * LINE_H);
+            self.rounded((x, LINES_Y, 4.0, height), 2.0, Some(GREY_PALE), None);
+            let thumb = height * MAX_LINES as f32 / count as f32;
+            let top = LINES_Y + (height - thumb) * scroll as f32 / max_scroll(count) as f32;
+            self.rounded((x, top, 4.0, thumb), 2.0, Some(GREY), None);
+        }
+    }
+
     /// The whole window, onto a DC the size of the client area.
     pub fn screen(&mut self, screen: &Screen) {
         self.fill_rect(0.0, 0.0, WIDTH, HEIGHT, WHITE);
@@ -571,7 +811,9 @@ impl Painter {
         // The rows, in a bordered card.
         let (cx, cw) = (MARGIN, WIDTH - 2.0 * MARGIN);
         self.rounded((cx, CARD_Y, cw, ROWS * ROW_H), 8.0, None, Some(BORDER));
-        let rows = std::iter::once(&screen.sign_in).chain(&screen.rows);
+        let rows = std::iter::once(&screen.sign_in)
+            .chain(&screen.rows)
+            .chain(std::iter::once(&screen.tasks));
         for (i, row) in rows.enumerate() {
             let y = CARD_Y + i as f32 * ROW_H;
             if i > 0 {
@@ -783,5 +1025,24 @@ mod tests {
         assert_eq!(row_at(x, CARD_Y - 1.0), None);
         assert_eq!(row_at(MARGIN - 1.0, CARD_Y + 1.0), None);
         assert_eq!(row_at(WIDTH - MARGIN, CARD_Y + 1.0), None);
+    }
+
+    #[test]
+    fn the_tasks_window_finds_its_switch_and_lines() {
+        assert!(on_tasks_toggle(TASKS_WIDTH - MARGIN - 1.0, TOGGLE.1 + 1.0));
+        assert!(!on_tasks_toggle(MARGIN, TOGGLE.1 + 1.0));
+        let x = TASKS_WIDTH / 2.0;
+        assert_eq!(task_line_at(x, LINES_Y, 2, 0), Some(0));
+        assert_eq!(task_line_at(x, LINES_Y + LINE_H, 2, 0), Some(1));
+        assert_eq!(task_line_at(x, LINES_Y + 2.0 * LINE_H, 2, 0), None);
+        assert_eq!(task_line_at(x, LINES_Y - 1.0, 2, 0), None);
+        // Scrolled 3 down a list of 9: the first line shown is the fourth.
+        assert_eq!(task_line_at(x, LINES_Y, 9, 3), Some(3));
+        // Scrolling stops once the last line is in view.
+        assert_eq!(task_line_at(x, LINES_Y, 9, 50), Some(4));
+        assert_eq!(
+            task_line_at(x, LINES_Y + MAX_LINES as f32 * LINE_H, 9, 0),
+            None
+        );
     }
 }
