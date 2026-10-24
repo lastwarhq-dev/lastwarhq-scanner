@@ -67,6 +67,23 @@ Only one copy of the tool runs at a time.
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
 
+### Docking beside the game
+
+While the game window is open, the tool's window sits against its left edge and the
+[secret tasks map](#secret-tasks) against its right edge, their tops level with the game
+window's.
+
+- They follow the game window as it moves or is resized, minimise and restore with it, and
+  come forward when you switch to the game, without taking the focus from it.
+- A window you move by hand stays where you put it until the game window next moves.
+- A docked spot on another screen is fine. If it would leave every screen, the window may hang
+  off the edge, but its title bar and at least 100 pixels of its width stay on a screen; past
+  that it moves over the game window's edge instead.
+- The game window is found by its class and title (`UnityWndClass`, "Last War-Survival Game").
+  With no game window, the windows stay where they are.
+- Placement assumes every screen uses the same Windows scaling; on a screen scaled differently
+  from the main one, the windows can land off their spot.
+
 ### Debug log
 
 **Debug log** in the footer opens a second window that lists the messages the game server
@@ -317,7 +334,9 @@ cleared. Once the account's alliance is known, another alliance's member list is
   the sign-in at start-up, and syncing at most once a minute). It listens only while you sign
   in, on `127.0.0.1`, for the browser to come back.
 - **Hands off the game.** It never hooks, reads the memory of, or modifies the game. The only
-  game file it reads is the mail database.
+  game file it reads is the mail database. To dock beside the game window, it asks Windows
+  where that window is and to be told when it moves, minimises or comes forward (out-of-context
+  window events, which load nothing into the game); it never opens the game process.
 - **Memory only.** Data lives in memory while the tool runs and is gone when it closes. It
   keeps only its LastWarHQ sign-in token, in Windows Credential Manager, and the only file it
   writes is its own exe, when you update it.

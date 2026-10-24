@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::state::{Install, State};
 use crate::auth;
+use crate::ui::dock;
 use crate::ui::log;
 use crate::ui::paint::{self, ButtonState, HANDLE, Painter, RECT};
 use crate::ui::status::{Mark, Screen, screen};
@@ -373,6 +374,7 @@ pub fn run(shared: Arc<Mutex<State>>) -> Result<(), String> {
         SetTimer(window, TIMER_ID, 1000, std::ptr::null());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
+        dock::follow();
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -426,6 +428,11 @@ fn show_button(button: HWND, screen: &Screen) {
             }
         }
     }
+}
+
+/// The status window, once it is open.
+pub(super) fn handle() -> Option<HWND> {
+    UI.with(|ui| ui.borrow().as_ref().map(|u| u.window))
 }
 
 /// Rereads the shared state and repaints if the screen changed. The window data is not
@@ -682,7 +689,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: usize, lpara
 
 fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
-        WM_TIMER => refresh(),
+        WM_TIMER => {
+            refresh();
+            dock::follow();
+        }
         WM_PAINT => {
             paint_window(hwnd);
             return 0;

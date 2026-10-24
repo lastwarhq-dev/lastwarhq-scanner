@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
+use crate::ui::dock;
 use crate::ui::paint::{self, HANDLE, Painter, RECT};
 use crate::ui::tasks::{Filter, TasksScreen, tasks_screen};
 use crate::ui::window::{error_box, set_clipboard, state, wide};
@@ -252,7 +253,13 @@ fn create() -> Result<(), String> {
         SetTimer(window, TIMER_ID, 1000, std::ptr::null());
         ShowWindow(window, SW_SHOW);
     }
+    dock::follow();
     Ok(())
+}
+
+/// The window, while it is open.
+pub(super) fn handle() -> Option<HWND> {
+    TASKS.with(|t| t.borrow().as_ref().map(|u| u.window))
 }
 
 /// The screen as of now, on the game server's clock.

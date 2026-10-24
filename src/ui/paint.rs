@@ -12,7 +12,7 @@ use crate::ui::tasks::{MAX_LINES, TasksScreen, line_name};
 pub type HANDLE = *mut c_void;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RECT {
     pub left: i32,
     pub top: i32,
