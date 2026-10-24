@@ -28,8 +28,9 @@ pub enum ApiError {
     UnknownAlliance,
     /// `429 too_many_requests`: wait this many seconds (`Retry-After`), if given.
     TooManyRequests(Option<u64>),
-    /// `503 busy` from `sync`: other uploads for the alliance kept getting in first and nothing
-    /// from this one was saved. Send it again after this many seconds (`Retry-After`), if given.
+    /// `503 busy` from `sync`: other uploads for the alliance kept getting in first, so the
+    /// upload stopped part-way (sections before it may be saved). Send the whole upload again
+    /// after this many seconds (`Retry-After`), if given; saved sections come back unchanged.
     Busy(Option<u64>),
     Failed(String),
 }

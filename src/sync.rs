@@ -390,7 +390,7 @@ mod tests {
         assert!(!due(&state, "a", answered + Duration::from_secs(119)));
         assert!(
             due(&state, "a", answered + Duration::from_secs(120)),
-            "nothing was saved, so the same content goes again"
+            "the upload stopped part-way, so the same content goes again"
         );
     }
 
