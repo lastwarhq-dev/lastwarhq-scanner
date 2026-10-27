@@ -20,6 +20,7 @@ use crate::ui::log;
 use crate::ui::paint::{self, ButtonState, HANDLE, Painter, RECT};
 use crate::ui::status::{Mark, Screen, screen};
 use crate::ui::tasks_window;
+use crate::ui::trucks_window;
 use crate::update::{Version, install};
 use crate::util::time::now;
 
@@ -206,6 +207,8 @@ const SIGN_IN_ROW: usize = 0;
 const ALLIANCE_ROW: usize = 1;
 /// The card row that opens the secret tasks map when clicked.
 const TASKS_ROW: usize = 5;
+/// The card row that opens the trucks map when clicked.
+const TRUCKS_ROW: usize = 6;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 
@@ -522,7 +525,7 @@ fn clickable_row(x: i32, y: i32) -> Option<usize> {
     let clickable = match row {
         SIGN_IN_ROW => !auth::busy(&s.auth),
         ALLIANCE_ROW => s.view.alliance_id().is_some(),
-        TASKS_ROW => true,
+        TASKS_ROW | TRUCKS_ROW => true,
         _ => false,
     };
     clickable.then_some(row)
@@ -706,6 +709,7 @@ fn handle_message(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
                 Some(SIGN_IN_ROW) => sign_in_clicked(),
                 Some(ALLIANCE_ROW) => copy_alliance_id(),
                 Some(TASKS_ROW) => tasks_window::open(),
+                Some(TRUCKS_ROW) => trucks_window::open(),
                 _ if on_debug_link(x, y) => log::open(),
                 _ => {}
             }

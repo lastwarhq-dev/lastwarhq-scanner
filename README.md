@@ -64,6 +64,7 @@ Only one copy of the tool runs at a time.
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet, or your own server, which you shouldn't loot. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
+| Trucks | The server last viewed on the world map, and how many reindeer and UR trucks have been seen there that can still be raided, leaving out your alliance's. Click the row to open the map: see [Trucks](#trucks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
 | Footer | The version, or an update (see [Updates](#updates)), and the **Debug log** link. |
 
@@ -71,7 +72,8 @@ Only one copy of the tool runs at a time.
 
 While the game window is open, the tool's window sits against its left edge and the
 [secret tasks map](#secret-tasks) against its right edge, their tops level with the game
-window's.
+window's. The [trucks map](#trucks) sits against the right edge too: below the secret tasks
+map while that is open, at the top otherwise.
 
 - They follow the game window as it moves or is resized, minimise and restore with it, and
   come forward when you switch to the game, without taking the focus from it.
@@ -132,6 +134,37 @@ and the tasks fill in as the game loads each part of it.
   tool started can count as scanned without its tasks having been seen.
 - Tasks are kept in memory only, per server, until the tool closes: their position, task id,
   loots taken, times, and whether you have looted them. Who owns or looted them is not kept.
+
+### Trucks
+
+Clicking the **Trucks** row opens a map of the reindeer and UR trucks on the server you are
+viewing in the game, moving as they drive. Trucks come in as the game sends them: when it loads
+a part of the world map, when a truck reaches a city or sets off from one, and when you tap one.
+
+| Part | Shows |
+|---|---|
+| Title | The server the game last loaded the world map for, and how many of its cities have been placed (see below). |
+| Reindeer only | Shows only reindeer trucks. On at first. |
+| Power slider | Shows only trucks defended by that much power at most, from 0 to 100M in steps of 1M; at the far right, any power. 40M at first. |
+| Map | The 1000 × 1000 world map, north at the top, with what has been scanned and the white frame of the part loaded last, as on the [secret tasks map](#secret-tasks). Small light blue squares are the cities placed so far. Each truck is where it is now: red with a white edge for a reindeer, gold for UR, with a faint line of its colour to the city it is heading for, once that is placed. The selected truck has a white ring, and a white line through the cities it goes to next. |
+| Summary | How much of the map has been scanned, and how many trucks are shown and seen; with a truck selected, its next city, when it gets there and when its route ends. |
+| List | Reindeer first, then the weakest defended: the kind, the defending power, where it is now, raids taken out of those it can take, and when it reaches its next city. Scroll it with the mouse wheel; click one to select it and copy where it is now. |
+
+- A truck's kind is its `cfgId`: 234 is a reindeer; 140 to 150 are UR for HQ 20 to 30, and 5031
+  to 5035 UR for HQ 31 to 35. Other trucks aren't shown.
+- A UR truck can be raided twice and a reindeer once; a truck raided that often, or whose route
+  has ended, drops off. Your alliance's trucks are never shown, once your alliance is known.
+- A truck drives from city to city along a route set when it leaves, in straight lines at a
+  steady speed, stopping about 6 seconds at each city. From one message about it, the tool
+  works out where it is at any moment, as far as it knows where the cities on its route are.
+- Cities are placed from the trucks' own messages: each names the two cities of its leg. Any
+  truck's message counts, whatever its kind, so cities fill in as the game sends trucks. A truck
+  between cities not yet placed is listed with **X ? Y ?** and isn't on the map.
+- Tapping a truck the game already has can bring back only its id and version, with no details,
+  so a truck the game loaded before the tool started may not be seen until it reaches a city or
+  sets off from one.
+- Trucks are kept in memory only, until the tool closes: their kind, defending power, raids
+  taken, alliance id, route and times. Who owns or raided them is not kept.
 
 ### Signing in to LastWarHQ
 

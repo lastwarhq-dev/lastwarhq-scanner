@@ -1,6 +1,7 @@
 //! Keeps the tool's windows docked beside the game window: the status window against its left
-//! edge and the secret tasks map against its right edge, tops aligned. They move when the game
-//! window moves or resizes, minimise and restore with it, and come forward with it.
+//! edge, and the secret tasks map and the trucks map against its right edge, tops aligned, the
+//! trucks map below the tasks map while that is open. They move when the game window moves or
+//! resizes, minimise and restore with it, and come forward with it.
 //!
 //! Only the game window is looked at, never the game process: the window is found by its class
 //! and title, its frame read from the window manager, and its moves come as out-of-context
@@ -17,7 +18,7 @@ use std::ffi::c_void;
 
 use crate::ui::paint::{HANDLE, RECT};
 use crate::ui::window::wide;
-use crate::ui::{tasks_window, window};
+use crate::ui::{tasks_window, trucks_window, window};
 
 type HWND = HANDLE;
 type WinEventProc = unsafe extern "system" fn(HANDLE, u32, HWND, i32, i32, u32, u32);
@@ -149,9 +150,9 @@ struct Placed {
 #[derive(Default)]
 struct Dock {
     game: Option<Game>,
-    /// Per side, as last docked; it is docked again once the game frame, the screens or the
-    /// window itself differ.
-    placed: [Option<Placed>; 2],
+    /// Per window (see [`windows`]), as last docked; it is docked again once its place beside
+    /// the game frame, the screens or the window itself differ.
+    placed: [Option<Placed>; 3],
     /// The tool's windows minimised because the game window was, to restore with it.
     minimised: Vec<HWND>,
 }
@@ -172,15 +173,21 @@ pub fn follow() {
     });
 }
 
+/// The tool's windows, open or not, with the side each docks on, in stacking order.
+fn windows() -> [(Side, Option<HWND>); 3] {
+    [
+        (Side::Left, window::handle()),
+        (Side::Right, tasks_window::handle()),
+        (Side::Right, trucks_window::handle()),
+    ]
+}
+
 impl Dock {
     fn follow(&mut self) {
         let Some(game) = self.game_window() else {
             return;
         };
-        let windows = [
-            (Side::Left, window::handle()),
-            (Side::Right, tasks_window::handle()),
-        ];
+        let windows = windows();
         // SAFETY: `game` is a window handle checked by `game_window`; the tool's windows belong
         // to this thread; `frame` and the window calls take valid handles and out-parameters.
         unsafe {
@@ -198,21 +205,31 @@ impl Dock {
                 return;
             };
             let screens = screens();
-            for (side, window) in windows {
+            // Windows on the same side stack down from the game window's top, in order.
+            let mut below = [0; 2];
+            for (slot, (side, window)) in windows.into_iter().enumerate() {
                 let Some(window) = window else {
                     continue;
                 };
-                let placed = Placed {
-                    window,
-                    game: game_frame,
-                    screens: screens.clone(),
-                };
-                let slot = &mut self.placed[side as usize];
-                if IsIconic(window) != 0 || slot.as_ref() == Some(&placed) {
+                if IsIconic(window) != 0 {
                     continue;
                 }
-                dock(window, side, game_frame, &screens);
-                *slot = Some(placed);
+                let beside = RECT {
+                    top: game_frame.top + below[side as usize],
+                    ..game_frame
+                };
+                let placed = Placed {
+                    window,
+                    game: beside,
+                    screens: screens.clone(),
+                };
+                if self.placed[slot].as_ref() != Some(&placed) {
+                    dock(window, side, beside, &screens);
+                    self.placed[slot] = Some(placed);
+                }
+                if let Some(f) = frame(window) {
+                    below[side as usize] += f.bottom - f.top;
+                }
             }
         }
     }
@@ -359,10 +376,7 @@ fn screens() -> Vec<RECT> {
 
 /// Brings the tool's windows forward, without taking the focus from the game.
 fn raise() {
-    for window in [window::handle(), tasks_window::handle()]
-        .into_iter()
-        .flatten()
-    {
+    for window in windows().into_iter().filter_map(|(_, w)| w) {
         // SAFETY: a window of this thread's.
         unsafe {
             SetWindowPos(

@@ -190,7 +190,7 @@ pub fn tasks_screen(
 
 /// The cells of `scan` loaded since the last daily reset (02:00 UTC) before `now`, as runs
 /// of fresh or older cells, and how much of the map they cover, in whole percent.
-fn scanned_runs(scan: &Scan, now: Duration) -> (Vec<ScannedRun>, u32) {
+pub(crate) fn scanned_runs(scan: &Scan, now: Duration) -> (Vec<ScannedRun>, u32) {
     let secs = now.as_secs();
     let reset = secs - (secs + 86_400 - 7_200) % 86_400;
     let state = |loaded: u32| {
@@ -242,7 +242,7 @@ pub fn line_name(line: &TaskLine) -> String {
 }
 
 /// A wait as "45s", "12m" or "1h 05m".
-fn wait(time: Duration) -> String {
+pub(crate) fn wait(time: Duration) -> String {
     let secs = time.as_secs();
     match secs {
         0..60 => format!("{secs}s"),

@@ -6,8 +6,10 @@
 use std::ffi::c_void;
 
 use crate::game::tasks::{CELL, Rarity};
+use crate::game::trucks::Kind;
 use crate::ui::status::{DAY_NAMES, Day, Mark, Screen};
-use crate::ui::tasks::{MAX_LINES, TasksScreen, line_name};
+use crate::ui::tasks::{MAX_LINES, ScannedRun, TasksScreen, line_name};
+use crate::ui::trucks::{POWER_MAX, POWER_STEP, TrucksScreen, kind_name, power_label, power_text};
 
 pub type HANDLE = *mut c_void;
 
@@ -148,7 +150,7 @@ const MARGIN: f32 = 16.0;
 const HEADER_Y: f32 = 22.0;
 const BADGE: f32 = 68.0;
 const CARD_Y: f32 = 114.0;
-const ROWS: f32 = 6.0;
+const ROWS: f32 = 7.0;
 const ROW_H: f32 = 54.0;
 const VS_Y: f32 = CARD_Y + ROWS * ROW_H + 24.0;
 const TILES_Y: f32 = VS_Y + 34.0;
@@ -184,6 +186,54 @@ const SR_BLUE: u32 = 0x3B82F6;
 const SSR_PURPLE: u32 = 0xA855F7;
 const UR_GOLD: u32 = 0xF59E0B;
 const SHINY_GOLD: u32 = 0xFDE047;
+const REINDEER_RED: u32 = 0xEF4444;
+/// A city trucks drive between.
+const CITY: u32 = 0x93C5FD;
+/// The selected line in a list.
+const SELECTED_PALE: u32 = 0xE3EEFC;
+
+/// The trucks window has the secret tasks window's size and map. Its power slider sits where
+/// the zoom line does there: its label, then the track.
+const SLIDER_LABEL: (f32, f32, f32, f32) = (MARGIN, 45.0, 104.0, 22.0);
+const SLIDER: (f32, f32, f32, f32) = (
+    MARGIN + 116.0,
+    45.0,
+    TASKS_WIDTH - 2.0 * MARGIN - 116.0 - 8.0,
+    22.0,
+);
+const KNOB: f32 = 7.0;
+
+fn kind_color(kind: Kind) -> u32 {
+    match kind {
+        Kind::Reindeer => REINDEER_RED,
+        Kind::Ur => UR_GOLD,
+    }
+}
+
+/// Whether the 96-DPI point (x, y) is on the trucks window's "Reindeer only" switch.
+pub fn on_reindeer_toggle(x: f32, y: f32) -> bool {
+    on_tasks_toggle(x, y)
+}
+
+/// Whether the 96-DPI point (x, y) is on the power slider, its knob's reach included.
+pub fn on_slider(x: f32, y: f32) -> bool {
+    let (sx, sy, sw, sh) = SLIDER;
+    (sx - KNOB..sx + sw + KNOB).contains(&x) && (sy..sy + sh).contains(&y)
+}
+
+/// The power the slider stands for with its knob at the 96-DPI x, to the step.
+pub fn slider_power(x: f32) -> i64 {
+    let (sx, _, sw, _) = SLIDER;
+    let steps = (POWER_MAX / POWER_STEP) as f32;
+    let step = (((x - sx) / sw).clamp(0.0, 1.0) * steps).round() as i64;
+    step * POWER_STEP
+}
+
+/// Where the slider's knob is for `power`.
+fn slider_x(power: i64) -> f32 {
+    let (sx, _, sw, _) = SLIDER;
+    sx + sw * power.clamp(0, POWER_MAX) as f32 / POWER_MAX as f32
+}
 
 fn rarity_color(rarity: Rarity) -> u32 {
     match rarity {
@@ -698,39 +748,10 @@ impl Painter {
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
 
-        // The map: north (the highest y) at the top, with a line every tenth of the way.
-        self.rounded((MARGIN, MAP_Y, MAP_SIDE, MAP_SIDE), 6.0, Some(MAP_BG), None);
+        self.map_base(screen.size, &screen.scanned, screen.area);
         let size = screen.size.max(1) as f32;
-        let cell = CELL as f32 / size * MAP_SIDE;
-        for run in &screen.scanned {
-            let color = if run.fresh {
-                MAP_SCANNED
-            } else {
-                MAP_SCANNED_OLD
-            };
-            // Rows count up from the bottom; the last row and column may be cut short.
-            let bottom = MAP_Y + MAP_SIDE - run.row as f32 * cell;
-            let top = (bottom - cell).max(MAP_Y);
-            let left = MARGIN + run.from as f32 * cell;
-            let right = (MARGIN + run.to as f32 * cell).min(MARGIN + MAP_SIDE);
-            self.fill_rect(left, top, right - left, bottom - top, color);
-        }
-        for i in 1..10 {
-            let at = i as f32 * MAP_SIDE / 10.0;
-            self.fill_rect(MARGIN + at, MAP_Y + 4.0, 1.0, MAP_SIDE - 8.0, MAP_GRID);
-            self.fill_rect(MARGIN + 4.0, MAP_Y + at, MAP_SIDE - 8.0, 1.0, MAP_GRID);
-        }
         let to_x = |x: f32| MARGIN + x / size * MAP_SIDE;
         let to_y = |y: f32| MAP_Y + (1.0 - y / size) * MAP_SIDE;
-        if let Some((left, bottom, right, top)) = screen.area {
-            let (x0, x1) = (to_x(left as f32), to_x(right as f32 + 1.0));
-            let (y0, y1) = (to_y(top as f32 + 1.0), to_y(bottom as f32));
-            self.frame(
-                (x0, y0, (x1 - x0).max(2.0), (y1 - y0).max(2.0)),
-                0xC0FF_FFFF,
-                1.5,
-            );
-        }
         // Rarer tasks are drawn last, on top.
         for marker in screen.markers.iter().rev() {
             let (cx, cy) = (to_x(marker.x as f32 + 0.5), to_y(marker.y as f32 + 0.5));
@@ -811,15 +832,205 @@ impl Painter {
                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
         }
-        // A scrollbar when there are more lines than fit: the thumb shows which are in view.
-        let count = screen.lines.len();
-        if count > MAX_LINES {
-            let (x, height) = (TASKS_WIDTH - MARGIN - 4.0, MAX_LINES as f32 * LINE_H);
-            self.rounded((x, LINES_Y, 4.0, height), 2.0, Some(GREY_PALE), None);
-            let thumb = height * MAX_LINES as f32 / count as f32;
-            let top = LINES_Y + (height - thumb) * scroll as f32 / max_scroll(count) as f32;
-            self.rounded((x, top, 4.0, thumb), 2.0, Some(GREY), None);
+        self.scrollbar(screen.lines.len(), scroll);
+    }
+
+    /// The map `size` squares across, north (the highest y) at the top: what has been
+    /// `scanned`, a line every tenth of the way, and a frame round the `area` loaded last.
+    fn map_base(&self, size: u32, scanned: &[ScannedRun], area: Option<(u32, u32, u32, u32)>) {
+        self.rounded((MARGIN, MAP_Y, MAP_SIDE, MAP_SIDE), 6.0, Some(MAP_BG), None);
+        let size = size.max(1) as f32;
+        let cell = CELL as f32 / size * MAP_SIDE;
+        for run in scanned {
+            let color = if run.fresh {
+                MAP_SCANNED
+            } else {
+                MAP_SCANNED_OLD
+            };
+            // Rows count up from the bottom; the last row and column may be cut short.
+            let bottom = MAP_Y + MAP_SIDE - run.row as f32 * cell;
+            let top = (bottom - cell).max(MAP_Y);
+            let left = MARGIN + run.from as f32 * cell;
+            let right = (MARGIN + run.to as f32 * cell).min(MARGIN + MAP_SIDE);
+            self.fill_rect(left, top, right - left, bottom - top, color);
         }
+        for i in 1..10 {
+            let at = i as f32 * MAP_SIDE / 10.0;
+            self.fill_rect(MARGIN + at, MAP_Y + 4.0, 1.0, MAP_SIDE - 8.0, MAP_GRID);
+            self.fill_rect(MARGIN + 4.0, MAP_Y + at, MAP_SIDE - 8.0, 1.0, MAP_GRID);
+        }
+        let to_x = |x: f32| MARGIN + x / size * MAP_SIDE;
+        let to_y = |y: f32| MAP_Y + (1.0 - y / size) * MAP_SIDE;
+        if let Some((left, bottom, right, top)) = area {
+            let (x0, x1) = (to_x(left as f32), to_x(right as f32 + 1.0));
+            let (y0, y1) = (to_y(top as f32 + 1.0), to_y(bottom as f32));
+            self.frame(
+                (x0, y0, (x1 - x0).max(2.0), (y1 - y0).max(2.0)),
+                0xC0FF_FFFF,
+                1.5,
+            );
+        }
+    }
+
+    /// A scrollbar beside a list of `count` lines scrolled `scroll` down, when there are more
+    /// than fit: the thumb shows which are in view.
+    fn scrollbar(&self, count: usize, scroll: usize) {
+        if count <= MAX_LINES {
+            return;
+        }
+        let (x, height) = (TASKS_WIDTH - MARGIN - 4.0, MAX_LINES as f32 * LINE_H);
+        self.rounded((x, LINES_Y, 4.0, height), 2.0, Some(GREY_PALE), None);
+        let thumb = height * MAX_LINES as f32 / count as f32;
+        let top = LINES_Y + (height - thumb) * scroll as f32 / max_scroll(count) as f32;
+        self.rounded((x, top, 4.0, thumb), 2.0, Some(GREY), None);
+    }
+
+    /// Joined lines through `points` (96-DPI), in an ARGB colour.
+    fn polyline(&self, points: &[(f32, f32)], color: u32, width: f32) {
+        let s = self.scale;
+        let points: Vec<PointF> = points
+            .iter()
+            .map(|&(x, y)| PointF { x: x * s, y: y * s })
+            .collect();
+        self.graphics(|g| {
+            // SAFETY: `g` is valid for this closure; `points` outlives the call; the pen is
+            // deleted here.
+            unsafe {
+                let mut pen: HANDLE = std::ptr::null_mut();
+                if GdipCreatePen1(color, width * s, UNIT_PIXEL, &mut pen) == 0 {
+                    GdipSetPenLineJoin(pen, LINE_JOIN_ROUND);
+                    GdipDrawLines(g, pen, points.as_ptr(), points.len() as i32);
+                    GdipDeletePen(pen);
+                }
+            }
+        });
+    }
+
+    /// The trucks window, onto a DC the size of its client area. `note` replaces the summary
+    /// for a moment, after a click; the list starts `scroll` lines down.
+    pub fn trucks(&mut self, screen: &TrucksScreen, note: Option<&str>, scroll: usize) {
+        self.fill_rect(0.0, 0.0, TASKS_WIDTH, TASKS_HEIGHT, WHITE);
+
+        // The server, the "Reindeer only" switch, and the power slider.
+        self.text(
+            &screen.title,
+            (MARGIN, 12.0, TASKS_WIDTH - 2.0 * MARGIN - TOGGLE.2, 30.0),
+            Font::Label,
+            TEXT,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        self.checkbox(TOGGLE, "Reindeer only", screen.filter.reindeer_only);
+        self.text(
+            &power_label(screen.filter.max_power),
+            SLIDER_LABEL,
+            Font::Body,
+            TEXT,
+            DT_SINGLELINE | DT_VCENTER,
+        );
+        let (sx, sy, sw, sh) = SLIDER;
+        let cy = sy + sh / 2.0;
+        self.rounded((sx, cy - 2.0, sw, 4.0), 2.0, Some(GREY_PALE), None);
+        let knob = slider_x(screen.filter.max_power);
+        if knob > sx + 1.0 {
+            self.rounded((sx, cy - 2.0, knob - sx, 4.0), 2.0, Some(BLUE), None);
+        }
+        self.circle(knob, cy, KNOB, Some(argb(WHITE)), Some((argb(BLUE), 2.0)));
+
+        // The map, the cities placed, the selected truck's way ahead, and the trucks where
+        // they are now.
+        self.map_base(screen.size, &screen.scanned, screen.area);
+        let size = screen.size.max(1) as f32;
+        let to_map = |(x, y): (f32, f32)| {
+            (
+                MARGIN + (x + 0.5) / size * MAP_SIDE,
+                MAP_Y + (1.0 - (y + 0.5) / size) * MAP_SIDE,
+            )
+        };
+        for &(x, y) in &screen.cities {
+            let (cx, cy) = to_map((x as f32, y as f32));
+            self.fill_rect(cx - 2.0, cy - 2.0, 4.0, 4.0, CITY);
+        }
+        if screen.route.len() > 1 {
+            let path: Vec<(f32, f32)> = screen.route.iter().map(|&p| to_map(p)).collect();
+            self.polyline(&path, 0xB0FF_FFFF, 1.5);
+            for &(x, y) in &path[1..] {
+                self.circle(x, y, 2.5, Some(argb(WHITE)), None);
+            }
+        }
+        // Each truck's leg: a faint line in its colour to the city it is heading for.
+        for marker in screen.markers.iter().rev() {
+            if let Some(city) = marker.heading {
+                let leg = [to_map((marker.x, marker.y)), to_map(city)];
+                self.polyline(&leg, 0x9000_0000 | kind_color(marker.kind), 1.5);
+            }
+        }
+        // Reindeer are drawn last, on top.
+        for marker in screen.markers.iter().rev() {
+            let (cx, cy) = to_map((marker.x, marker.y));
+            let color = argb(kind_color(marker.kind));
+            match marker.kind {
+                Kind::Reindeer => self.circle(cx, cy, 5.5, Some(color), Some((argb(WHITE), 1.5))),
+                Kind::Ur => self.circle(cx, cy, 4.5, Some(color), None),
+            }
+            if marker.selected {
+                self.circle(cx, cy, 9.5, None, Some((argb(WHITE), 2.0)));
+            }
+        }
+
+        // The summary, or a note, and the trucks.
+        let (summary, color) = match note {
+            Some(note) => (note, GREEN_TEXT),
+            None => (screen.summary.as_str(), TEXT),
+        };
+        self.text(
+            summary,
+            (MARGIN, SUMMARY_Y, MAP_SIDE, 24.0),
+            Font::Body,
+            color,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        let scroll = scroll.min(max_scroll(screen.lines.len()));
+        for (i, line) in screen.lines.iter().skip(scroll).take(MAX_LINES).enumerate() {
+            let y = LINES_Y + i as f32 * LINE_H;
+            if line.selected {
+                self.fill_rect(MARGIN, y, MAP_SIDE - SCROLLBAR_W, LINE_H, SELECTED_PALE);
+            }
+            let color = argb(kind_color(line.kind));
+            self.circle(MARGIN + 5.0, y + LINE_H / 2.0, 5.0, Some(color), None);
+            self.text(
+                kind_name(line.kind),
+                (MARGIN + 16.0, y, 70.0, LINE_H),
+                Font::Label,
+                TEXT,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+            self.text(
+                &power_text(line.power),
+                (MARGIN + 88.0, y, 52.0, LINE_H),
+                Font::Body,
+                TEXT,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+            let at = match line.at {
+                Some((x, y)) => format!("X {x}  Y {y}"),
+                None => "X ?  Y ?".to_string(),
+            };
+            self.text(
+                &at,
+                (MARGIN + 142.0, y, 92.0, LINE_H),
+                Font::Body,
+                TEXT,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+            self.text(
+                &line.text,
+                (MARGIN + 236.0, y, MAP_SIDE - 236.0 - SCROLLBAR_W, LINE_H),
+                Font::Small,
+                TEXT_SOFT,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+        self.scrollbar(screen.lines.len(), scroll);
     }
 
     /// The whole window, onto a DC the size of the client area.
@@ -876,7 +1087,7 @@ impl Painter {
         self.rounded((cx, CARD_Y, cw, ROWS * ROW_H), 8.0, None, Some(BORDER));
         let rows = std::iter::once(&screen.sign_in)
             .chain(&screen.rows)
-            .chain(std::iter::once(&screen.tasks));
+            .chain([&screen.tasks, &screen.trucks]);
         for (i, row) in rows.enumerate() {
             let y = CARD_Y + i as f32 * ROW_H;
             if i > 0 {
@@ -1088,6 +1299,19 @@ mod tests {
         assert_eq!(row_at(x, CARD_Y - 1.0), None);
         assert_eq!(row_at(MARGIN - 1.0, CARD_Y + 1.0), None);
         assert_eq!(row_at(WIDTH - MARGIN, CARD_Y + 1.0), None);
+    }
+
+    #[test]
+    fn the_power_slider_snaps_to_whole_millions() {
+        let (sx, sy, sw, _) = SLIDER;
+        assert_eq!(slider_power(sx), 0);
+        assert_eq!(slider_power(sx - 50.0), 0);
+        assert_eq!(slider_power(sx + sw), POWER_MAX);
+        assert_eq!(slider_power(sx + sw * 0.401), 40_000_000);
+        assert_eq!(slider_power(slider_x(40_000_000)), 40_000_000);
+        assert!(on_slider(sx - 2.0, sy + 1.0) && on_slider(sx + sw + 2.0, sy + 1.0));
+        assert!(!on_slider(sx + sw / 2.0, sy - 1.0));
+        assert!(!on_slider(MARGIN, sy + 1.0));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::app::state::{AuthStatus, AuthStep, Install, State, SyncStatus, Update
 use crate::capture::pipeline::HEARTBEAT_TIMEOUT;
 use crate::game::account::Account;
 use crate::game::tasks::{Rarity, ShinyDay, Task, World};
+use crate::game::trucks::{Kind, Trucks};
 use crate::game::week::{ds_signups_open, vs_day, vs_ranking_shown};
 use crate::sync::{self, Hold};
 use crate::ui::tasks::shiny_text;
@@ -46,6 +47,9 @@ pub struct Screen {
     /// The secret tasks seen on the world map, below the data rows; clicking it opens the
     /// map. It doesn't count towards the headline either.
     pub tasks: Row,
+    /// The UR and reindeer trucks seen on the world map, below the secret tasks; clicking it
+    /// opens their map. It doesn't count towards the headline either.
+    pub trucks: Row,
     /// What to do about missing VS days, if any are missing.
     pub vs_hint: Option<String>,
     /// Monday to Saturday.
@@ -197,6 +201,11 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         ),
         rows,
         tasks: tasks_row(&state.world, game_now, state.home_server()),
+        trucks: trucks_row(
+            &state.trucks,
+            state.world.last_look().map(|l| l.server),
+            view.alliance_id(),
+        ),
         vs_hint,
         vs_days,
         footer: footer(&state.update, Version::current()),
@@ -248,6 +257,36 @@ fn tasks_row(world: &World, now: Duration, home: Option<u32>) -> Row {
     };
     Row {
         label: "Secret tasks",
+        mark,
+        text,
+    }
+}
+
+/// The trucks row: the server last looked at, and how many reindeer and UR trucks have been
+/// seen on it that can still be raided, leaving out our alliance's (`ours`).
+fn trucks_row(trucks: &Trucks, server: Option<u32>, ours: Option<&str>) -> Row {
+    let (mark, text) = match server {
+        None => (Mark::Off, "Click to open the map".to_string()),
+        Some(server) => {
+            let theirs: Vec<Kind> = trucks
+                .trucks(server)
+                .filter(|t| ours.is_none() || t.alliance.as_deref() != ours)
+                .map(|t| t.kind)
+                .collect();
+            let reindeer = theirs.iter().filter(|k| **k == Kind::Reindeer).count();
+            let ur = theirs.len() - reindeer;
+            match (reindeer, ur) {
+                (0, 0) => (Mark::Off, format!("Server {server} · none seen yet")),
+                (0, ur) => (Mark::Pending, format!("Server {server} · {ur} UR")),
+                (reindeer, ur) => (
+                    Mark::Done,
+                    format!("Server {server} · {reindeer} reindeer · {ur} UR"),
+                ),
+            }
+        }
+    };
+    Row {
+        label: "Trucks",
         mark,
         text,
     }
@@ -838,5 +877,41 @@ mod tests {
             (row.mark, row.text.as_str()),
             (Mark::Action, "Server 901 · your server, don't loot")
         );
+    }
+
+    #[test]
+    fn the_trucks_row_counts_reindeer_and_ur() {
+        use crate::game::trucks::tests::{OTHERS, Run, SERVER, T0, march};
+        let server = SERVER as u32;
+        let mut trucks = Trucks::default();
+        assert_eq!(
+            trucks_row(&trucks, None, None).text,
+            "Click to open the map"
+        );
+        assert_eq!(
+            trucks_row(&trucks, Some(server), None).text,
+            format!("Server {server} · none seen yet")
+        );
+        let time = Duration::from_millis(T0);
+        let ur = Run {
+            cfg_id: 5031,
+            id: 1,
+            ..Run::default()
+        };
+        trucks.apply("push.world.march.new", &march(&ur), time);
+        let row = trucks_row(&trucks, Some(server), None);
+        assert_eq!(
+            (row.mark, row.text),
+            (Mark::Pending, format!("Server {server} · 1 UR"))
+        );
+        trucks.apply("push.world.march.new", &march(&Run::default()), time);
+        let row = trucks_row(&trucks, Some(server), None);
+        assert_eq!(
+            (row.mark, row.text),
+            (Mark::Done, format!("Server {server} · 1 reindeer · 1 UR"))
+        );
+        // Our own alliance's trucks aren't counted.
+        let row = trucks_row(&trucks, Some(server), Some(OTHERS));
+        assert_eq!(row.text, format!("Server {server} · none seen yet"));
     }
 }

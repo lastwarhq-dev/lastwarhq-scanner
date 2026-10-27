@@ -14,7 +14,7 @@ use crate::protocol::sfs::Value;
 
 /// The map's side, in squares, when a message doesn't say. Point ids number the squares row by
 /// row from 1: id − 1 = y × side + x.
-const DEFAULT_SIZE: u32 = 1000;
+pub(crate) const DEFAULT_SIZE: u32 = 1000;
 /// The largest map side taken from a message.
 const MAX_SIZE: u32 = 10_000;
 /// The point type of a secret task.
@@ -476,7 +476,7 @@ fn names(value: &Value, uid: &str) -> bool {
 }
 
 /// (x, y) of point id `point` on a map `size` squares across.
-fn position(point: u64, size: u32) -> Option<(u32, u32)> {
+pub(crate) fn position(point: u64, size: u32) -> Option<(u32, u32)> {
     let size = u64::from(size);
     let index = point.checked_sub(1).filter(|i| *i < size * size)?;
     Some(((index % size) as u32, (index / size) as u32))
@@ -486,12 +486,13 @@ fn int(value: &Value, key: &str) -> Option<i64> {
     value.get(key)?.as_i64()
 }
 
-fn millis(ms: i64) -> Duration {
+pub(crate) fn millis(ms: i64) -> Duration {
     Duration::from_millis(ms.max(0) as u64)
 }
 
-/// A map point's protobuf message: sent as a byte array, or as a hex string.
-fn point_bytes(value: &Value) -> Option<Cow<'_, [u8]>> {
+/// A protobuf message inside the SFSObject (a map point, a march): sent as a byte array, or as
+/// a hex string.
+pub(crate) fn point_bytes(value: &Value) -> Option<Cow<'_, [u8]>> {
     match value {
         Value::ByteArray(bytes) => Some(Cow::Borrowed(bytes)),
         other => proto::from_hex(other.as_str()?).map(Cow::Owned),

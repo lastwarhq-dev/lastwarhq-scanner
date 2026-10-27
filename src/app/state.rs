@@ -7,6 +7,7 @@ use crate::app::export::Seen;
 use crate::auth::api::SyncReply;
 use crate::game::battle::DsBattle;
 use crate::game::tasks::World;
+use crate::game::trucks::Trucks;
 use crate::game::view::View;
 use crate::protocol::message::Message;
 use crate::update::Version;
@@ -24,6 +25,8 @@ pub struct State {
     pub debug: DebugLog,
     /// The secret tasks seen on the world map.
     pub world: World,
+    /// The UR and reindeer trucks seen on the world map.
+    pub trucks: Trucks,
 }
 
 /// Uploads to LastWarHQ, for the view's alliance. Cleared by every sign-in and sign-out, and
@@ -196,6 +199,7 @@ impl State {
             self.world
                 .set_account(self.view.account().map(|a| a.uid.as_str()));
             self.world.apply(command, data, time);
+            self.trucks.apply(command, data, time);
         }
         // Leaving an alliance (also by switching account) restarts the sync for the next one.
         if before.alliance.is_some() && before.alliance != self.identity().alliance {
