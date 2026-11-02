@@ -163,8 +163,56 @@ impl Participant {
     }
 }
 
-/// A Desert Storm `group` or `state` as the API takes it: 0, 1 or 2. Anything else would get
-/// the whole upload refused, so it is sent as unknown (`null`).
+/// A row of the Canyon Storm participants panel, `quarantine.act.player.list`. Only what the
+/// member list doesn't already give: the panel's name and power are left out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CanyonParticipant {
+    pub uid: String,
+    /// "Total Hero Power".
+    pub hero_power: Option<i64>,
+    /// Battle slots the player is available for, in the order picked: 1 = Thursday 14:00,
+    /// 2 = Friday 01:00 UTC.
+    pub choose_time_list: Option<Vec<i64>>,
+    /// Team asked for with "Request to battle": 1 = Team A, 2 = Team B; none when the player
+    /// hasn't asked.
+    pub apply: Option<i64>,
+    /// Team assigned: 1 = Team A, 2 = Team B, 0 = none.
+    pub group: Option<i64>,
+    /// Role within the team: 1 = main, 2 = sub, 0 = not in a team.
+    pub state: Option<i64>,
+}
+
+impl Entry for CanyonParticipant {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+}
+
+impl CanyonParticipant {
+    /// `{"uid", "heroPower", "chooseTimeList", "apply", "group", "state"}`. A slot list holding
+    /// anything but 1 or 2 is sent as unknown (`null`): the API refuses the upload otherwise.
+    pub fn to_json(&self) -> String {
+        let slots = self
+            .choose_time_list
+            .as_ref()
+            .filter(|list| list.iter().all(|s| (1..=2).contains(s)))
+            .map_or("null".into(), |list| {
+                let items: Vec<String> = list.iter().map(i64::to_string).collect();
+                format!("[{}]", items.join(","))
+            });
+        format!(
+            "{{\"uid\":{},\"heroPower\":{},\"chooseTimeList\":{slots},\"apply\":{},\"group\":{},\"state\":{}}}",
+            escape(&self.uid),
+            int(count(self.hero_power)),
+            int(team_code(self.apply)),
+            int(team_code(self.group)),
+            int(team_code(self.state))
+        )
+    }
+}
+
+/// A Desert Storm or Canyon Storm `apply`, `group` or `state` as the API takes it: 0, 1 or 2.
+/// Anything else would get the whole upload refused, so it is sent as unknown (`null`).
 fn team_code(value: Option<i64>) -> Option<i64> {
     value.filter(|v| (0..=2).contains(v))
 }
@@ -255,6 +303,27 @@ mod tests {
             ..Participant::default()
         };
         assert!(empty.to_json().contains(r#""chooseTimeList":[],"#));
+        let canyon = CanyonParticipant {
+            uid: "9".into(),
+            hero_power: Some(140),
+            choose_time_list: Some(vec![2, 1]),
+            apply: Some(2),
+            group: Some(0),
+            state: Some(0),
+        };
+        assert_eq!(
+            canyon.to_json(),
+            r#"{"uid":"9","heroPower":140,"chooseTimeList":[2,1],"apply":2,"group":0,"state":0}"#
+        );
+        // Not signed up: no slots and no request.
+        let unsigned = CanyonParticipant {
+            uid: "9".into(),
+            ..CanyonParticipant::default()
+        };
+        assert_eq!(
+            unsigned.to_json(),
+            r#"{"uid":"9","heroPower":null,"chooseTimeList":null,"apply":null,"group":null,"state":null}"#
+        );
         let score = VsScore {
             uid: "9".into(),
             score: Some(42),
@@ -369,5 +438,31 @@ mod tests {
             member.to_json(),
             r#"{"uid":"9","name":null,"rank":null,"power":null,"armyKill":7}"#
         );
+
+        // Canyon Storm has two slots; any other in the list makes the whole list unknown.
+        let canyon = CanyonParticipant {
+            uid: "9".into(),
+            hero_power: Some(-1),
+            choose_time_list: Some(vec![1, 3]),
+            apply: Some(3),
+            group: Some(-1),
+            state: Some(7),
+        };
+        assert_eq!(
+            canyon.to_json(),
+            r#"{"uid":"9","heroPower":null,"chooseTimeList":null,"apply":null,"group":null,"state":null}"#
+        );
+        let canyon = CanyonParticipant {
+            uid: "9".into(),
+            choose_time_list: Some(vec![0]),
+            ..CanyonParticipant::default()
+        };
+        assert!(canyon.to_json().contains(r#""chooseTimeList":null,"#));
+        let canyon = CanyonParticipant {
+            uid: "9".into(),
+            choose_time_list: Some(vec![]),
+            ..CanyonParticipant::default()
+        };
+        assert!(canyon.to_json().contains(r#""chooseTimeList":[],"#));
     }
 }

@@ -7,18 +7,20 @@
 //!
 //! | Change | Cleared |
 //! |---|---|
-//! | VS week | VS rankings, Desert Storm sign-ups and battles |
-//! | Alliance | the above, and the member list |
+//! | VS week | VS rankings, Desert Storm sign-ups and battles, Canyon Storm sign-ups |
+//! | Alliance | the above, the member list, and the week of the Canyon Storm battles |
 //! | Account | everything, including the account itself |
 //!
 //! Desert Storm sign-ups are also cleared, and new ones ignored, from Saturday until the
-//! weekly reset (see [`ds_signups_open`]).
+//! weekly reset (see [`ds_signups_open`]). Canyon Storm sign-ups open on Saturday for the next
+//! week's battles, so a participants panel is kept only when the battles the game last listed
+//! fall in the view's week.
 
 use std::time::Duration;
 
 use crate::game::account::{Account, own_uid};
 use crate::game::battle::DsBattle;
-use crate::game::panel::{Member, Panel, Participant, VsScore};
+use crate::game::panel::{CanyonParticipant, Member, Panel, Participant, VsScore};
 use crate::game::week::{ds_signups_open, vs_day};
 use crate::protocol::message::Message;
 use crate::protocol::sfs::Value;
@@ -40,6 +42,11 @@ pub struct View {
     pub vs_days: [Option<Panel<VsScore>>; 6],
     /// This week's Desert Storm battles, from the last mail load.
     ds_battles: Vec<DsBattle>,
+    /// The Canyon Storm participants panel, for the battles in the view's week.
+    pub cs_signups: Option<Panel<CanyonParticipant>>,
+    /// The VS week of the Canyon Storm battles the game last listed (`quarantine.act.info`).
+    /// Kept across the weekly reset: sign-ups open before it, for the next week's battles.
+    cs_battle_week: Option<u64>,
 }
 
 /// What [`View::clear`] drops; each scope includes the ones before it.
@@ -102,8 +109,33 @@ impl View {
                 }
             }
             "al.battle.rank.info" => self.apply_vs(data, time) || changed,
+            "quarantine.act.info" => match canyon_battle_week(data) {
+                Some(week) if self.cs_battle_week != Some(week) => {
+                    self.cs_battle_week = Some(week);
+                    true
+                }
+                _ => changed,
+            },
+            "quarantine.act.player.list" => {
+                // From Saturday the panel is the next week's sign-up; this week's stays.
+                if self.cs_battle_week != self.vs_week {
+                    return changed;
+                }
+                match read_list(data, "users", canyon_participant, time) {
+                    Some(list) => {
+                        self.cs_signups = Some(list);
+                        true
+                    }
+                    None => changed,
+                }
+            }
             _ => changed,
         }
+    }
+
+    /// The VS week of the Canyon Storm battles the game last listed, if it has listed any.
+    pub fn cs_battle_week(&self) -> Option<u64> {
+        self.cs_battle_week
     }
 
     /// The VS week the view holds data for.
@@ -154,10 +186,12 @@ impl View {
         }
         self.ds_battles.clear();
         self.ds_signups = None;
+        self.cs_signups = None;
         self.vs_days = Default::default();
         if let Scope::Alliance = scope {
             self.roster_alliance = None;
             self.roster = None;
+            self.cs_battle_week = None;
         }
     }
 
@@ -224,6 +258,9 @@ impl View {
         if let Some(signups) = &mut self.ds_signups {
             shift(&mut signups.time);
         }
+        if let Some(signups) = &mut self.cs_signups {
+            shift(&mut signups.time);
+        }
         for day in self.vs_days.iter_mut().flatten() {
             shift(&mut day.time);
         }
@@ -242,7 +279,8 @@ impl View {
     /// already rolled into a week the server hasn't reached, the view goes back to the
     /// server's week, so its messages aren't taken as late: what was recorded meanwhile belongs
     /// to that week after all, but the mail's battles were picked for the wrong one and go
-    /// until the next read. Otherwise this is the usual reset.
+    /// until the next read, and so do Canyon Storm sign-ups, kept for that week's battles.
+    /// Otherwise this is the usual reset.
     ///
     /// A VS day's ranking is taken only once the day is over, judged by this PC's clock until
     /// now. A ranking whose corrected time shows its day was still on is dropped, to be
@@ -254,6 +292,7 @@ impl View {
             Some(ahead) if ahead > week => {
                 self.vs_week = Some(week);
                 self.ds_battles.clear();
+                self.cs_signups = None;
                 true
             }
             _ => self.roll_vs_week(now),
@@ -277,7 +316,8 @@ impl View {
     }
 
     /// Clears everything that belongs to one VS week once `time` falls in a later week: VS
-    /// rankings and Desert Storm sign-ups and battles. The member list stays. Also clears the
+    /// rankings, Desert Storm sign-ups and battles, and Canyon Storm sign-ups. The member list
+    /// stays. Also clears the
     /// sign-ups from Saturday on. Called for every message and, from the window's clock, every
     /// second, so both happen even while the game is closed. Returns whether anything changed.
     pub fn roll_vs_week(&mut self, time: Duration) -> bool {
@@ -421,6 +461,32 @@ fn participant(u: &Value, uid: String) -> Participant {
         group: int(u, "group"),
         state: int(u, "state"),
     }
+}
+
+/// A row of `quarantine.act.player.list`, the Canyon Storm participants panel.
+fn canyon_participant(u: &Value, uid: String) -> CanyonParticipant {
+    CanyonParticipant {
+        uid,
+        hero_power: int(u, "heroPower"),
+        choose_time_list: int_list(u, "chooseTimeList"),
+        apply: int(u, "apply"),
+        group: int(u, "group"),
+        state: int(u, "state"),
+    }
+}
+
+/// The VS week of the first Canyon Storm battle in `quarantine.act.info`'s `battleTimes`
+/// (`startTime` in milliseconds). Both slots fall on the same VS day, Thursday: the 01:00 UTC
+/// one is before the 02:00 reset.
+fn canyon_battle_week(data: &Value) -> Option<u64> {
+    let start = data
+        .get("battleTimes")?
+        .as_array()?
+        .iter()
+        .filter_map(|b| b.get("startTime")?.as_i64())
+        .filter(|&t| t > 0)
+        .min()?;
+    Some(vs_day(Duration::from_millis(start as u64)).0)
 }
 
 /// A row of `al.battle.rank.info`'s `rankInfo`.
@@ -1065,5 +1131,150 @@ mod tests {
         assert_eq!(account.alliance_name, None);
         assert_eq!(account.alliance_abbr, None);
         assert_eq!(account.name.as_deref(), Some("Player One"));
+    }
+
+    /// `quarantine.act.info` listing the two Canyon Storm battles of the VS week starting at
+    /// `monday`: Thursday 14:00 and Friday 01:00 UTC.
+    fn canyon_info(monday: u64) -> Value {
+        let slot = |period: i32, start: u64| {
+            obj(vec![
+                ("battlePeriod", Value::Int(period)),
+                ("readyTime", Value::Long((start - 300) as i64 * 1000)),
+                ("startTime", Value::Long(start as i64 * 1000)),
+                ("endTime", Value::Long((start + 1800) as i64 * 1000)),
+            ])
+        };
+        let thursday = monday + 3 * DAY;
+        obj(vec![
+            ("stage", Value::Int(1)),
+            (
+                "battleTimes",
+                Value::Array(vec![
+                    slot(1, thursday + 12 * 3600),
+                    slot(2, thursday + 23 * 3600),
+                ]),
+            ),
+        ])
+    }
+
+    /// `quarantine.act.player.list`: player 1 asked for Team B and is free for slot 1; player
+    /// 2 hasn't signed up.
+    fn canyon_players() -> Value {
+        let signed = obj(vec![
+            ("uid", Value::Str("1".into())),
+            ("heroPower", Value::Long(140)),
+            ("apply", Value::Int(2)),
+            ("chooseTimeList", Value::Array(vec![Value::Int(1)])),
+            ("group", Value::Int(0)),
+            ("state", Value::Int(0)),
+        ]);
+        let unsigned = obj(vec![
+            ("uid", Value::Str("2".into())),
+            ("heroPower", Value::Long(90)),
+            ("group", Value::Int(0)),
+            ("state", Value::Int(0)),
+        ]);
+        obj(vec![("users", Value::Array(vec![signed, unsigned]))])
+    }
+
+    #[test]
+    fn canyon_storm_signups_are_kept_for_this_weeks_battles() {
+        let mut view = view_with_ann();
+        // Saturday: sign-ups open for the battles of the week starting on Monday.
+        let saturday = SATURDAY + 3600;
+        assert!(view.apply(&message(
+            "quarantine.act.info",
+            canyon_info(MONDAY),
+            saturday
+        )));
+        assert_eq!(
+            view.cs_battle_week(),
+            Some(vs_day(Duration::from_secs(MONDAY)).0)
+        );
+        view.apply(&message(
+            "quarantine.act.player.list",
+            canyon_players(),
+            saturday,
+        ));
+        assert_eq!(view.cs_signups, None, "next week's battles");
+
+        // After the reset, the same battles are this week's.
+        let monday = MONDAY + 3600;
+        assert!(view.apply(&message(
+            "quarantine.act.player.list",
+            canyon_players(),
+            monday
+        )));
+        let signups = view.cs_signups.as_ref().unwrap();
+        assert_eq!(signups.time, Duration::from_secs(monday));
+        assert!(signups.complete);
+        assert_eq!(
+            signups.entries,
+            [
+                CanyonParticipant {
+                    uid: "1".into(),
+                    hero_power: Some(140),
+                    choose_time_list: Some(vec![1]),
+                    apply: Some(2),
+                    group: Some(0),
+                    state: Some(0),
+                },
+                CanyonParticipant {
+                    uid: "2".into(),
+                    hero_power: Some(90),
+                    group: Some(0),
+                    state: Some(0),
+                    ..CanyonParticipant::default()
+                },
+            ]
+        );
+
+        // The next Saturday the panel moves on to the following week: this week's list stays
+        // until the reset.
+        let next_saturday = SATURDAY + 7 * DAY + 3600;
+        view.apply(&message(
+            "quarantine.act.info",
+            canyon_info(MONDAY + 7 * DAY),
+            next_saturday,
+        ));
+        view.apply(&message(
+            "quarantine.act.player.list",
+            canyon_players(),
+            next_saturday,
+        ));
+        assert_eq!(
+            view.cs_signups.as_ref().unwrap().time,
+            Duration::from_secs(monday)
+        );
+        assert!(view.roll_vs_week(Duration::from_secs(MONDAY + 7 * DAY)));
+        assert_eq!(view.cs_signups, None);
+    }
+
+    #[test]
+    fn canyon_storm_signups_wait_for_the_battle_times() {
+        // The participants panel before any `quarantine.act.info`: its week is unknown.
+        let mut view = view_with_ann();
+        let monday = MONDAY + 3600;
+        view.apply(&message(
+            "quarantine.act.player.list",
+            canyon_players(),
+            monday,
+        ));
+        assert_eq!(view.cs_signups, None);
+        view.apply(&message("quarantine.act.info", canyon_info(MONDAY), monday));
+        view.apply(&message(
+            "quarantine.act.player.list",
+            canyon_players(),
+            monday,
+        ));
+        assert!(view.cs_signups.is_some());
+
+        // Another alliance's battles say nothing about ours.
+        let other = roster("other", vec![member_entry("1", "Ann", 4, 100)]);
+        view.apply(&message("al.rank", other, monday + 60));
+        assert_eq!(
+            (view.cs_signups.as_ref(), view.cs_battle_week()),
+            (None, None)
+        );
     }
 }

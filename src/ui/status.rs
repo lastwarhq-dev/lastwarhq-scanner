@@ -42,8 +42,8 @@ pub struct Screen {
     /// The LastWarHQ sign-in, shown above the data rows; clicking it signs in or out. It
     /// doesn't count towards the headline, which is about the game data.
     pub sign_in: Row,
-    /// Alliance, roster, DS sign-ups and DS results.
-    pub rows: [Row; 4],
+    /// Alliance, roster, DS sign-ups, DS results and CS sign-ups.
+    pub rows: [Row; 5],
     /// The secret tasks seen on the world map, below the data rows; clicking it opens the
     /// map. It doesn't count towards the headline either.
     pub tasks: Row,
@@ -145,12 +145,26 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         (None, Some(err)) => (Mark::Failed, format!("Mail: {err}")),
         (None, None) => (Mark::Pending, "Reading mail…".to_string()),
     };
+    // Canyon Storm sign-ups open on Saturday for the next week's battles, and only the
+    // battles' own week takes them.
+    let week = view.week();
+    let canyon = match (&view.cs_signups, view.cs_battle_week()) {
+        (Some(_), _) => (Mark::Done, IN_SYNC.to_string()),
+        (None, Some(battles)) if Some(battles) == week => {
+            (Mark::Action, "Open the CS participants".to_string())
+        }
+        (None, Some(battles)) if week.is_some_and(|w| battles > w) => {
+            (Mark::Off, "For next week · open after Monday".to_string())
+        }
+        (None, _) => (Mark::Off, "Not seen this week".to_string()),
+    };
     let row = |label, (mark, text)| Row { label, mark, text };
     let rows = [
         row("Alliance", alliance),
         row("Roster", roster),
         row("DS sign-ups", signups),
         row("DS results", results),
+        row("CS sign-ups", canyon),
     ];
 
     let (_, today) = vs_day(game_now);
@@ -516,6 +530,7 @@ mod tests {
                 (Mark::Done, "In sync"),
                 (Mark::Done, "In sync"),
                 (Mark::Done, "In sync"),
+                (Mark::Off, "Not seen this week"),
             ]
         );
         assert_eq!(s.vs_hint, None);
@@ -560,6 +575,50 @@ mod tests {
     }
 
     #[test]
+    fn the_cs_row_follows_the_week_of_the_battles() {
+        // Battle times for the week starting Monday 2026-10-05: Thursday 14:00 UTC.
+        let thursday = SATURDAY + 5 * 86_400 + 4 * 3600;
+        let info = Value::Object(vec![(
+            "battleTimes".into(),
+            Value::Array(vec![Value::Object(vec![(
+                "startTime".into(),
+                Value::Long(thursday as i64 * 1000),
+            )])]),
+        )]);
+        let cs_row = |state: &State, now: Duration| {
+            let row = &screen(state, now).rows[4];
+            (row.mark, row.text.clone())
+        };
+
+        // Saturday: sign-ups are open, but for next week.
+        let now = Duration::from_secs(SATURDAY);
+        let mut state = loaded(now);
+        assert_eq!(
+            cs_row(&state, now),
+            (Mark::Off, "Not seen this week".to_string())
+        );
+        state.record(&Message::command_for_test(
+            "quarantine.act.info",
+            info,
+            SATURDAY,
+        ));
+        assert_eq!(
+            cs_row(&state, now),
+            (Mark::Off, "For next week · open after Monday".to_string())
+        );
+
+        // Monday: the battles are this week's, and the participants are to be opened.
+        let monday = Duration::from_secs(SATURDAY + 2 * 86_400);
+        state.tick(monday);
+        assert_eq!(
+            cs_row(&state, monday),
+            (Mark::Action, "Open the CS participants".to_string())
+        );
+        state.view.cs_signups = Some(empty_panel(monday));
+        assert_eq!(cs_row(&state, monday), (Mark::Done, "In sync".to_string()));
+    }
+
+    #[test]
     fn on_sunday_only_saturdays_ranking_can_be_opened() {
         let sunday = Duration::from_secs(SATURDAY + 86_400);
         let mut state = loaded(sunday);
@@ -598,6 +657,7 @@ mod tests {
                 (Mark::Action, "Open the member list"),
                 (Mark::Action, "Open the DS participants"),
                 (Mark::Pending, "Reading mail…"),
+                (Mark::Off, "Not seen this week"),
             ]
         );
 

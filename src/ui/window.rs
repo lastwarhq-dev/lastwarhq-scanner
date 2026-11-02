@@ -206,9 +206,9 @@ const SIGN_IN_ROW: usize = 0;
 /// The card row that copies the alliance id when clicked.
 const ALLIANCE_ROW: usize = 1;
 /// The card row that opens the secret tasks map when clicked.
-const TASKS_ROW: usize = 5;
+const TASKS_ROW: usize = 6;
 /// The card row that opens the trucks map when clicked.
-const TRUCKS_ROW: usize = 6;
+const TRUCKS_ROW: usize = 7;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 

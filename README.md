@@ -1,7 +1,8 @@
 # LastWarHQ Scanner
 
 A small Windows tool that collects your alliance's data from the **Last War: Survival** PC client
-while you play: the member roster, Desert Storm sign-ups and results, and VS duel scores. One
+while you play: the member roster, Desert Storm sign-ups and results, Canyon Storm sign-ups,
+and VS duel scores. One
 window shows what has been collected and what is still missing.
 
 It works by **reading the game's own network traffic**, passively. It never sends anything to
@@ -45,6 +46,7 @@ install.
 |---|---|
 | Ranks, power, kills | the **alliance member list** |
 | Hero power, Desert Storm time slots and teams | the **Desert Storm participants** panel |
+| Canyon Storm time slots, team requests and teams | the **Canyon Storm participants** panel, from Monday |
 | VS scores | the **VS duel** panel, and each **day tab** you want |
 | Desert Storm results | nothing: the tool reads them from the game's mail (see below) |
 
@@ -63,6 +65,7 @@ Only one copy of the tool runs at a time.
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
 | DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
+| CS sign-ups | **In sync** once this week's Canyon Storm participants panel has been loaded. **Open the CS participants** once the game has shown that this week has Canyon Storm battles. **For next week · open after Monday** (grey) when the sign-ups the game shows are for next week's battles; **Not seen this week** (grey) when the game hasn't shown any. See [Canyon Storm sign-ups](#canyon-storm-sign-ups). |
 | Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet, or your own server, which you shouldn't loot. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
 | Trucks | The server last viewed on the world map, and how many reindeer and UR trucks have been seen there that can still be raided, leaving out your alliance's. Click the row to open the map: see [Trucks](#trucks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
@@ -216,6 +219,21 @@ fields. So from Saturday 02:00 UTC (the end of Friday, server time) until the Mo
 reset, the tool clears the week's sign-ups, ignores the panel, and leaves `dsSignups` out of the
 payload. Sign-ups sent earlier in the week are the record for that week.
 
+### Canyon Storm sign-ups
+
+Canyon Storm sign-ups run from Saturday to the end of Monday, server time (Tuesday 02:00 UTC),
+for battles on the following Thursday: 14:00 and Friday 01:00 UTC (12:00 and 23:00 server
+time). So sign-ups open before the Monday 02:00 UTC weekly reset, for the next week's battles.
+
+The tool keeps the participants panel only when the battles the game lists with it fall in
+the current VS week:
+
+- A panel opened on Saturday or Sunday is for next week's battles and is ignored. Open it
+  again from Monday 02:00 UTC.
+- From Saturday, the panel shows the next week's sign-up, which is ignored too. The week's
+  last list is kept until the Monday reset.
+- In a week without Canyon Storm battles, nothing is kept, and `csSignups` is `null`.
+
 ### Desert Storm results (mail)
 
 Desert Storm results aren't sent with the panels; the game keeps them in its local mail
@@ -280,7 +298,8 @@ The tool syncs this payload to LastWarHQ (see [Syncing](#syncing)). It's built i
   empty or over 64 characters (16 for the tag), a negative power, kill count or score, or a
   warzone outside 1–99,999 is `null`. In each list, a player whose uid isn't 1–20 digits, and
   any past the 200th, is left out, and the list is then marked `complete: false`; a player named
-  twice keeps their first entry.
+  twice keeps their first entry. A team request, team or role outside 0–2, and a Canyon Storm
+  slot list holding anything but 1 or 2, are `null`.
 
 Each panel's newest list is sent as the game sent it, and every entry carries the player's
 `uid`. The tool doesn't merge panels or work anything out from them; the receiver joins them
@@ -289,7 +308,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "week": "2026-09-28",
   "generated": "2026-10-04T12:00:00Z",
   "alliance": { "id": "…", "name": "…", "abbr": "…", "warzone": 901, "updated": "…Z" },
@@ -304,6 +323,10 @@ only from `alliance`, so the other sections carry just what their panel adds.
   "dsResults": {
     "updated": "…Z",
     "battles": [{ "time": "…Z", "won": false, "complete": true, "players": [{ "uid": "…", "score": 5000000 }] }]
+  },
+  "csSignups": {
+    "updated": "…Z", "complete": true,
+    "players": [{ "uid": "…", "heroPower": 140000000, "chooseTimeList": [1], "apply": 2, "group": 0, "state": 0 }]
   },
   "vs": [
     { "updated": "…Z", "complete": true, "players": [{ "uid": "…", "score": 90000000 }] },
@@ -325,16 +348,17 @@ only from `alliance`, so the other sections carry just what their panel adds.
 | `roster` | The alliance member list. `rank` is 1–5 (R5 highest). Kept across the weekly reset. |
 | `dsSignups` | The Desert Storm participants panel, without the name and power the roster gives. `heroPower` is "Total Hero Power". `chooseTimeList`: time slots picked, in the order clicked (`1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC). `group`: team assigned, `1` = Team A, `2` = Team B, `0` = none. `state`: role within the team, `1` = main (20 per team), `2` = sub (10 per team), `0` = not in a team. `group` and `state` are `null` for any other value. `null` from Saturday 02:00 UTC to the Monday reset. |
 | `dsResults` | This week's battles from the result mails: when each ended, whether it was won, and each player's score. `complete: false` means a player entry in the mail couldn't be read. `null` until the mail has been read and the alliance is known. |
+| `csSignups` | The Canyon Storm participants panel for this week's battles, in the `dsSignups` shape plus `apply`. `chooseTimeList`: battle slots the player is available for, in the order picked (`1` = Thursday 14:00 UTC, `2` = Friday 01:00 UTC). `apply`: the team the player asked for with "Request to battle", `1` = Team A, `2` = Team B, `null` if they haven't asked. `group` and `state` as in `dsSignups`. `null` until this week's panel has been opened, and in weeks without Canyon Storm; see [Canyon Storm sign-ups](#canyon-storm-sign-ups). |
 | `vs` | Monday to Saturday: each completed day's VS ranking, `null` until that day's tab has been opened. The ranking lists both alliances; only our alliance's players are sent, so `players` is empty until the alliance is known. `complete` is `false` if any row of the ranking couldn't be read, or had no alliance (it might be one of ours). |
 
 Unknown values are `null`. Sections cleared at the weekly reset (`dsSignups`, `dsResults`,
-`vs`) go back to `null`.
+`csSignups`, `vs`) go back to `null`.
 
 ### Weekly reset
 
 VS days end at **02:00 UTC** (midnight server time), and the week rolls over on Monday at
 02:00 UTC. At the rollover, the tool clears that week's data: VS rankings, Desert Storm
-results and sign-ups. The roster stays. This happens even if the game is closed. The
+results and sign-ups, and Canyon Storm sign-ups. The roster stays. This happens even if the game is closed. The
 payload is built after checking for the rollover, game messages from the week that has ended
 are ignored, and mail read in a new week ignores last week's battles, so the data never mixes
 two weeks.
@@ -615,6 +639,41 @@ nothing over the game connection: the game already holds the mail locally.
   `FileContents\MailContents\<uid>\<mail uid>.bin`: a varint length, then JSON
   `{"b":{},"obj":{"battleContent":"<base64 protobuf>"}}`.
 
+### Canyon Storm participants: `quarantine.act.player.list`
+
+Opening the Canyon Storm participants panel sends, in this order: `quarantine.act.info`,
+`quarantine.act.player.list`, and `quarantine.commander.list` once per team.
+
+`quarantine.act.player.list`'s `p.p.users` lists the whole alliance:
+
+| Key | Contents |
+|---|---|
+| `uid`, `name` | |
+| `heroPower` | "Total Hero Power" |
+| `power` | |
+| `chooseTimeList` | battle slots the player is available for: the `battlePeriod` numbers of `quarantine.act.info` (1 = Thursday 14:00, 2 = Friday 01:00 UTC). Absent if not signed up. |
+| `apply` | the team asked for with "Request to battle": 1 = Team A, 2 = Team B. Absent if the player hasn't asked. |
+| `group`, `state` | team assigned and role within it, 0 until assigned |
+| `lv`, `serverId`, `monthCardEndTime`, `pic`, `picVer` | |
+
+There is no `armyPower` or `commander` field, unlike the Desert Storm panel.
+
+**`quarantine.act.info`** describes the event:
+
+| Key | Contents |
+|---|---|
+| `stage` | 1 while sign-ups are open |
+| `stageEndTime` | end of the stage, in seconds: Tuesday 02:00 UTC for sign-ups |
+| `battleTimes` | one entry per slot: `battlePeriod` (1 or 2), `readyTime`, `startTime`, `endTime` in milliseconds. Each battle lasts 30 minutes; `readyTime` is 5 minutes before the start. |
+| `group` | one entry per team: `battlePeriod` (the team's slot), `roleInfo` (the alliances in the team's match: `allianceId`, `allianceName`, `abbr`, `side`, `serverId`, `icon`, `skills`), `state`, `selfAssigned`, `lastBattlePeriod` |
+| `actId`, `season`, `battleFieldConfigId` | |
+
+From Saturday, `battleTimes` are the next week's battles. The tool takes the week of the
+earliest `startTime` as the week the panel belongs to.
+
+**`quarantine.commander.list`** has `group` (1 or 2) and `data`, the team's commanders. `data`
+was empty in every capture so far; the tool doesn't use it.
+
 ### VS duel
 
 - **`al.battle.rank.info`**: one message per day tab opened. `p.p.day` is 1 (Monday) to 6
@@ -654,13 +713,15 @@ known, member lists from other alliances are ignored.
 
 ### Keeping the panels
 
-- Each panel keeps only its newest list, as sent: the member list, the participants panel,
-  and one VS ranking per day. Panels aren't merged; every entry carries its player's `uid`.
+- Each panel keeps only its newest list, as sent: the member list, the Desert Storm and
+  Canyon Storm participants panels, and one VS ranking per day. Panels aren't merged; every entry carries its player's `uid`.
 - A newer list replaces the last one whole. An empty list (nothing readable) changes nothing.
   A list with an unreadable entry is kept and marked incomplete.
 - Today's VS ranking is skipped until the day ends.
 - From Saturday, the participants panel lists the alliance with empty `chooseTimeList` and no
   other sign-up fields; see [Desert Storm sign-ups](#desert-storm-sign-ups).
+- A Canyon Storm participants panel is kept only for the current week's battles; see
+  [Canyon Storm sign-ups](#canyon-storm-sign-ups).
 
 ### World map: secret tasks
 

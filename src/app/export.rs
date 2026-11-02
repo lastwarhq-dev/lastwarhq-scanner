@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use crate::app::state::State;
 use crate::game::panel::{
-    Entry, MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, game_text, players_for_api,
+    CanyonParticipant, Entry, MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, game_text,
+    players_for_api,
 };
 use crate::game::week::{monday_days, vs_day};
 use crate::util::json::escape;
@@ -21,7 +22,8 @@ use crate::util::time::utc_iso;
 /// Version of the payload layout; raised whenever its fields change meaning or shape.
 /// 2: one section per panel instead of merged players; the alliance at the top, in place of
 /// the account, which the roster already lists.
-pub const SCHEMA_VERSION: u32 = 2;
+/// 3: Canyon Storm sign-ups, `csSignups`.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The warzones the API takes.
 const WARZONES: std::ops::RangeInclusive<i64> = 1..=99_999;
@@ -47,9 +49,9 @@ pub struct Payload {
 
 /// The payload:
 ///
-/// `{"schemaVersion": 2, "week": "YYYY-MM-DD", "generated", "alliance": {...} | null,
+/// `{"schemaVersion": 3, "week": "YYYY-MM-DD", "generated", "alliance": {...} | null,
 ///   "roster": panel | null, "dsSignups": panel | null, "dsResults": {...} | null,
-///   "vs": [panel | null; 6]}`
+///   "csSignups": panel | null, "vs": [panel | null; 6]}`
 ///
 /// where a panel is `{"updated", "complete", "players": [...]}`.
 ///
@@ -71,10 +73,11 @@ pub fn payload(state: &mut State, now: Duration) -> Payload {
         .collect();
     let (alliance_json, alliance) = alliance_json(state, now);
     let content = format!(
-        "\"alliance\":{alliance_json},\"roster\":{},\"dsSignups\":{},\"dsResults\":{},\"vs\":[{}]",
+        "\"alliance\":{alliance_json},\"roster\":{},\"dsSignups\":{},\"dsResults\":{},\"csSignups\":{},\"vs\":[{}]",
         panel_json(&view.roster, Member::to_json),
         panel_json(&view.ds_signups, Participant::to_json),
         ds_results_json(state),
+        panel_json(&view.cs_signups, CanyonParticipant::to_json),
         vs.join(",")
     );
     let week = escape(&utc_iso(monday)[..10]);
@@ -256,13 +259,13 @@ mod tests {
         let mut state = State::default();
         state.mail.loaded = Some(Duration::from_secs(SATURDAY));
         let v = payload(&mut state, SATURDAY);
-        assert_eq!(v.get("schemaVersion"), Some(&Json::Number(2.0)));
+        assert_eq!(v.get("schemaVersion"), Some(&Json::Number(3.0)));
         assert_eq!(v.get("week").and_then(Json::as_str), Some("2026-09-28"));
         assert_eq!(
             v.get("generated").and_then(Json::as_str),
             Some("2026-10-03T10:00:00Z")
         );
-        for key in ["alliance", "roster", "dsSignups"] {
+        for key in ["alliance", "roster", "dsSignups", "csSignups"] {
             assert_eq!(v.get(key), Some(&Json::Null), "{key}");
         }
         assert_eq!(
@@ -323,6 +326,53 @@ mod tests {
         assert_eq!(
             *tuesday,
             json::parse(r#"[{"uid":"1","score":300}]"#).unwrap()
+        );
+    }
+
+    #[test]
+    fn cs_signups_carry_the_canyon_storm_panel() {
+        // Monday 02:00 UTC, the reset: the week's battles are on Thursday at 14:00 UTC.
+        let monday = SATURDAY + 2 * 86_400 - 8 * 3600;
+        let thursday = monday + 3 * 86_400 + 12 * 3600;
+        let mut state = State::default();
+        state.record(&roster(monday + 60));
+        let slot = object(vec![("startTime", Value::Long(thursday as i64 * 1000))]);
+        let info = object(vec![("battleTimes", Value::Array(vec![slot]))]);
+        state.record(&Message::command_for_test(
+            "quarantine.act.info",
+            info,
+            monday + 60,
+        ));
+        let player = object(vec![
+            ("uid", Value::Str("1".into())),
+            ("heroPower", Value::Long(140)),
+            ("apply", Value::Int(1)),
+            (
+                "chooseTimeList",
+                Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            ),
+            ("group", Value::Int(1)),
+            ("state", Value::Int(2)),
+        ]);
+        let users = object(vec![("users", Value::Array(vec![player]))]);
+        state.record(&Message::command_for_test(
+            "quarantine.act.player.list",
+            users,
+            monday + 60,
+        ));
+        let v = payload(&mut state, monday + 60);
+        assert_eq!(
+            field(&v, "csSignups", "updated").as_deref(),
+            Some("2026-10-05T02:01:00Z")
+        );
+        assert_eq!(
+            v.get("csSignups").and_then(|s| s.get("players")),
+            Some(
+                &json::parse(
+                    r#"[{"uid":"1","heroPower":140,"chooseTimeList":[1,2],"apply":1,"group":1,"state":2}]"#
+                )
+                .unwrap()
+            )
         );
     }
 

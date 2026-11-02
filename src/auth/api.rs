@@ -59,6 +59,7 @@ pub struct SyncReply {
     pub roster: String,
     pub ds_signups: String,
     pub ds_results: String,
+    pub cs_signups: String,
     /// Monday to Saturday.
     pub vs: Vec<String>,
     pub next_sync_after: Option<u64>,
@@ -209,6 +210,7 @@ fn parse_sync(data: &Json) -> SyncReply {
         roster: status("roster"),
         ds_signups: status("dsSignups"),
         ds_results: status("dsResults"),
+        cs_signups: status("csSignups"),
         vs,
         next_sync_after: next,
     }
@@ -298,7 +300,7 @@ mod tests {
     fn sync_answers_say_what_happened_to_each_section() {
         let data = reply(
             200,
-            br#"{"sections":{"alliance":"applied","roster":"unchanged","dsSignups":"stale","dsResults":"missing","vs":["applied","unchanged","stale","missing","missing","missing"]},"nextSyncAfter":60}"#,
+            br#"{"sections":{"alliance":"applied","roster":"unchanged","dsSignups":"stale","dsResults":"missing","csSignups":"applied","vs":["applied","unchanged","stale","missing","missing","missing"]},"nextSyncAfter":60}"#,
             None,
         )
         .unwrap();
@@ -309,6 +311,7 @@ mod tests {
                 roster: "unchanged".into(),
                 ds_signups: "stale".into(),
                 ds_results: "missing".into(),
+                cs_signups: "applied".into(),
                 vs: [
                     "applied",
                     "unchanged",
