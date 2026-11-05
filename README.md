@@ -48,7 +48,7 @@ install.
 | Hero power, Desert Storm time slots and teams | the **Desert Storm participants** panel |
 | Canyon Storm time slots, team requests and teams | the **Canyon Storm participants** panel, from Monday |
 | VS scores | the **VS duel** panel, and each **day tab** you want |
-| Desert Storm results | nothing: the tool reads them from the game's mail (see below) |
+| Desert Storm and Canyon Storm results | nothing: the tool reads them from the game's mail (see below) |
 
 When everything is loaded, the headline says **All in sync**.
 
@@ -64,8 +64,8 @@ Only one copy of the tool runs at a time.
 | Alliance | The account's alliance, as `[ABBR] Name`. Click the row to copy the alliance ID. The member list names the alliance only by id; the name comes with the identified account's profile or the Desert Storm participants panel, and until then the row shows the id. Until either has arrived, **Open the member list**. |
 | Roster | **In sync** once the alliance member list has been loaded; until then, **Open the member list**. |
 | DS sign-ups | **In sync** once the Desert Storm participants panel has been loaded; until then, **Open the DS participants**. From Saturday 02:00 UTC to the Monday reset, **Closed until Monday** (grey): see [Desert Storm sign-ups](#desert-storm-sign-ups). |
-| DS results | **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | CS sign-ups | **In sync** once this week's Canyon Storm participants panel has been loaded. **Open the CS participants** once the game has shown that this week has Canyon Storm battles. **For next week · open after Monday** (grey) when the sign-ups the game shows are for next week's battles; **Not seen this week** (grey) when the game hasn't shown any. See [Canyon Storm sign-ups](#canyon-storm-sign-ups). |
+| Storm results | Desert Storm and Canyon Storm results. **In sync** once the mail has been read. **Open the member list** while battles were found but the alliance isn't known yet. Red: why the mail couldn't be read; after an earlier good read, **Stale · mail: …**: the earlier results are kept, but may be out of date. |
 | Secret tasks | The server last viewed on the world map, whether it is shiny today, tomorrow or in 2 days (once you have entered its map), and how many shiny secret tasks can be looted there or are still in progress. Amber: a shiny day with no shiny task found yet, or your own server, which you shouldn't loot. Click the row to open the map: see [Secret tasks](#secret-tasks). It doesn't count towards the headline. |
 | Trucks | The server last viewed on the world map, and how many reindeer and UR trucks have been seen there that can still be raided, leaving out your alliance's. Click the row to open the map: see [Trucks](#trucks). It doesn't count towards the headline. |
 | VS scores | One tile per day, Monday to Saturday. Green tick: loaded. Dots: today, still in progress. Amber: over, but not loaded; open that day's tab. Empty ring: later this week. |
@@ -234,9 +234,10 @@ the current VS week:
   last list is kept until the Monday reset.
 - In a week without Canyon Storm battles, nothing is kept, and `csSignups` is `null`.
 
-### Desert Storm results (mail)
+### Desert Storm and Canyon Storm results (mail)
 
-Desert Storm results aren't sent with the panels; the game keeps them in its local mail
+Desert Storm and Canyon Storm results aren't sent with the panels; the game keeps them in its
+local mail
 database (`%USERPROFILE%\AppData\LocalLow\FunFly\Last War-Survival Game\config.db`). The tool
 reads that file when it starts and every 5 minutes after:
 
@@ -245,13 +246,15 @@ reads that file when it starts and every 5 minutes after:
   opening it.
 - If the game is in the middle of saving, the tool waits and retries rather than read a
   half-written file. A read that fails keeps what the last good read found.
-- It keeps only **this week's** Desert Storm result mails. The file holds the mail of every
-  account played on the PC, so a battle counts only if it was fought by your alliance. The
-  alliance comes from your profile or the alliance member list; until one of them has arrived,
-  no battle is counted and the row says to open the member list.
+- It keeps only **this week's** result mails. The file holds the mail of every account played
+  on the PC, so a battle counts only if it was fought by your alliance. The alliance comes from
+  your profile or the alliance member list; until one of them has arrived, no battle is
+  counted and the row says to open the member list.
 - Each battle is kept as its mail gives it: when it ended, won or lost, and each player's uid
   and score. The tool doesn't work out teams or who was absent; the receiver can, from the
   sign-ups.
+- In Canyon Storm, two alliances can fight on the same side, and the mail lists both
+  alliances' players. Only your alliance's players are kept.
 - If the account, alliance or week changes while the file is being read, the result is
   dropped; the next read picks up the change.
 
@@ -308,7 +311,7 @@ only from `alliance`, so the other sections carry just what their panel adds.
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "week": "2026-09-28",
   "generated": "2026-10-04T12:00:00Z",
   "alliance": { "id": "…", "name": "…", "abbr": "…", "warzone": 901, "updated": "…Z" },
@@ -327,6 +330,10 @@ only from `alliance`, so the other sections carry just what their panel adds.
   "csSignups": {
     "updated": "…Z", "complete": true,
     "players": [{ "uid": "…", "heroPower": 140000000, "chooseTimeList": [1], "apply": 2, "group": 0, "state": 0 }]
+  },
+  "csResults": {
+    "updated": "…Z",
+    "battles": [{ "time": "…Z", "won": true, "complete": true, "players": [{ "uid": "…", "score": 3800000 }] }]
   },
   "vs": [
     { "updated": "…Z", "complete": true, "players": [{ "uid": "…", "score": 90000000 }] },
@@ -349,19 +356,20 @@ only from `alliance`, so the other sections carry just what their panel adds.
 | `dsSignups` | The Desert Storm participants panel, without the name and power the roster gives. `heroPower` is "Total Hero Power". `chooseTimeList`: time slots picked, in the order clicked (`1` = 11:00 UTC, `2` = 20:00 UTC, `3` = 01:00 UTC). `group`: team assigned, `1` = Team A, `2` = Team B, `0` = none. `state`: role within the team, `1` = main (20 per team), `2` = sub (10 per team), `0` = not in a team. `group` and `state` are `null` for any other value. `null` from Saturday 02:00 UTC to the Monday reset. |
 | `dsResults` | This week's battles from the result mails: when each ended, whether it was won, and each player's score. `complete: false` means a player entry in the mail couldn't be read. `null` until the mail has been read and the alliance is known. |
 | `csSignups` | The Canyon Storm participants panel for this week's battles, in the `dsSignups` shape plus `apply`. `chooseTimeList`: battle slots the player is available for, in the order picked (`1` = Thursday 14:00 UTC, `2` = Friday 01:00 UTC). `apply`: the team the player asked for with "Request to battle", `1` = Team A, `2` = Team B, `null` if they haven't asked. `group` and `state` as in `dsSignups`. `null` until this week's panel has been opened, and in weeks without Canyon Storm; see [Canyon Storm sign-ups](#canyon-storm-sign-ups). |
+| `csResults` | This week's Canyon Storm battles, in the `dsResults` shape: one per team and battle. `players` lists only our alliance's players, though the mail can list another alliance fighting on our side. `null` until the mail has been read and the alliance is known. |
 | `vs` | Monday to Saturday: each completed day's VS ranking, `null` until that day's tab has been opened. The ranking lists both alliances; only our alliance's players are sent, so `players` is empty until the alliance is known. `complete` is `false` if any row of the ranking couldn't be read, or had no alliance (it might be one of ours). |
 
 Unknown values are `null`. Sections cleared at the weekly reset (`dsSignups`, `dsResults`,
-`csSignups`, `vs`) go back to `null`.
+`csSignups`, `csResults`, `vs`) go back to `null`.
 
 ### Weekly reset
 
 VS days end at **02:00 UTC** (midnight server time), and the week rolls over on Monday at
-02:00 UTC. At the rollover, the tool clears that week's data: VS rankings, Desert Storm
-results and sign-ups, and Canyon Storm sign-ups. The roster stays. This happens even if the game is closed. The
-payload is built after checking for the rollover, game messages from the week that has ended
-are ignored, and mail read in a new week ignores last week's battles, so the data never mixes
-two weeks.
+02:00 UTC. At the rollover, the tool clears that week's data: VS rankings, and Desert Storm
+and Canyon Storm results and sign-ups. The roster stays. This happens even if the game is
+closed. The payload is built after checking for the rollover, game messages from the week
+that has ended are ignored, and mail read in a new week ignores last week's battles, so the
+data never mixes two weeks.
 
 Switching to another game account also clears everything and starts fresh. If the account
 moves to another alliance, the old alliance's member list, rankings, sign-ups and results are
@@ -376,9 +384,9 @@ cleared. Once the account's alliance is known, another alliance's member list is
 | "Waiting for the game" · "Start the game and log in" | Start the game and log in. |
 | "No heartbeat from the game" | The game was closed or lost connection. The tool picks up the new connection by itself. |
 | "LastWarHQ Scanner is already running" | Another copy is open; use that one. |
-| DS results: "Mail: the game is saving its mail" | Nothing; the next read, within 5 minutes, tries again. |
-| DS results: "Open the member list" | Open the member list so the tool knows which battles are your alliance's. |
-| DS results: "Mail: … WAL mode, which is not supported" | The game stored its mail in a format the tool doesn't read. Please report it. |
+| Storm results: "Mail: the game is saving its mail" | Nothing; the next read, within 5 minutes, tries again. |
+| Storm results: "Open the member list" | Open the member list so the tool knows which battles are your alliance's. |
+| Storm results: "Mail: … WAL mode, which is not supported" | The game stored its mail in a format the tool doesn't read. Please report it. |
 | "Update failed: cannot save the update beside the exe" | The exe's folder isn't writable (for example Program Files). Move the exe to a folder you own, or download the release by hand. |
 
 ### What it does and doesn't do
@@ -673,6 +681,29 @@ earliest `startTime` as the week the panel belongs to.
 
 **`quarantine.commander.list`** has `group` (1 or 2) and `data`, the team's commanders. `data`
 was empty in every capture so far; the tool doesn't use it.
+
+### Canyon Storm results: local mail
+
+A Canyon Storm match is three alliances on two sides: side 1 is one alliance, side 2 is two
+alliances fighting together. Each team's result comes in a mail of `type` 181 and `mailId`
+61207, about a minute after the battle ends, beside a rewards mail (`type` 2, `mailId` 61201).
+Its `contents` is JSON:
+
+| `obj` key | Contents |
+|---|---|
+| `role` | the side the mail's account fought on: 1 or 2 |
+| `isWin` | whether that side won |
+| `alliances` | all three alliances `{alId, abbr, name, icon, serverId, role}`, `role` being each one's side |
+| `landlord`, `farmer` | side 1's and side 2's totals: `score` (the higher wins), `isWin`, `member`, `occupiedScore`, `plunderScore`, `resourceScore`, `centerOccupiedTime`, `electricOccupiedTime` |
+| `ranks` | every player on the mail's side: `{allianceId, uid, name, abbr, pic, picVer, score, battleScore, tacticsScore, cooperationScore}`; `score` is the sum of the other three |
+| `mvp` | the MVPs, each with a `type` |
+
+- On side 2, `ranks` lists both alliances' players. The tool makes one battle per alliance
+  on the mail's side, each with its own players, and uses only our alliance's.
+- An entry in `ranks` without a readable uid, score and alliance of that side marks every
+  battle of the mail incomplete.
+- Copies of a mail for other accounts are recognised as for Desert Storm: the same alliance,
+  opponents and side scores within 10 minutes.
 
 ### VS duel
 

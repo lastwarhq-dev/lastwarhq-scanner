@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::app::debug::DebugLog;
 use crate::app::export::Seen;
 use crate::auth::api::SyncReply;
-use crate::game::battle::DsBattle;
+use crate::game::battle::Battle;
 use crate::game::tasks::World;
 use crate::game::trucks::Trucks;
 use crate::game::view::View;
@@ -258,7 +258,7 @@ impl State {
     pub fn finish_mail_load(
         &mut self,
         started: &Identity,
-        result: Result<Vec<DsBattle>, String>,
+        result: Result<Vec<Battle>, String>,
         now: Duration,
     ) {
         self.tick(now);
@@ -268,7 +268,7 @@ impl State {
         }
         match result {
             Ok(battles) => {
-                self.view.set_ds_battles(battles, now);
+                self.view.set_battles(battles, now);
                 self.mail = MailStatus {
                     loaded: Some(now),
                     error: None,
@@ -300,6 +300,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::battle::Event;
     use crate::protocol::sfs::Value;
 
     /// Saturday 2026-10-03 10:00 UTC.
@@ -322,8 +323,9 @@ mod tests {
         Message::command_for_test("al.rank", data, secs)
     }
 
-    fn battle(alliance: &str, secs: u64) -> DsBattle {
-        DsBattle {
+    fn battle(alliance: &str, secs: u64) -> Battle {
+        Battle {
+            event: Event::DesertStorm,
             time: Duration::from_secs(secs),
             won: true,
             alliance_id: alliance.into(),

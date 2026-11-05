@@ -42,7 +42,7 @@ pub struct Screen {
     /// The LastWarHQ sign-in, shown above the data rows; clicking it signs in or out. It
     /// doesn't count towards the headline, which is about the game data.
     pub sign_in: Row,
-    /// Alliance, roster, DS sign-ups, DS results and CS sign-ups.
+    /// Alliance, roster, DS sign-ups, CS sign-ups, and Desert Storm and Canyon Storm results.
     pub rows: [Row; 5],
     /// The secret tasks seen on the world map, below the data rows; clicking it opens the
     /// map. It doesn't count towards the headline either.
@@ -163,8 +163,8 @@ pub fn screen(state: &State, now: Duration) -> Screen {
         row("Alliance", alliance),
         row("Roster", roster),
         row("DS sign-ups", signups),
-        row("DS results", results),
         row("CS sign-ups", canyon),
+        row("Storm results", results),
     ];
 
     let (_, today) = vs_day(game_now);
@@ -417,7 +417,7 @@ fn footer(update: &UpdateStatus, current: Version) -> Footer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::battle::DsBattle;
+    use crate::game::battle::{Battle, Event};
     use crate::game::panel::Panel;
     use crate::protocol::message::Message;
     use crate::protocol::sfs::Value;
@@ -529,8 +529,8 @@ mod tests {
                 (Mark::Done, "[EXA] Example Alliance"),
                 (Mark::Done, "In sync"),
                 (Mark::Done, "In sync"),
-                (Mark::Done, "In sync"),
                 (Mark::Off, "Not seen this week"),
+                (Mark::Done, "In sync"),
             ]
         );
         assert_eq!(s.vs_hint, None);
@@ -586,7 +586,7 @@ mod tests {
             )])]),
         )]);
         let cs_row = |state: &State, now: Duration| {
-            let row = &screen(state, now).rows[4];
+            let row = &screen(state, now).rows[3];
             (row.mark, row.text.clone())
         };
 
@@ -656,21 +656,22 @@ mod tests {
                 (Mark::Action, "Open the member list"),
                 (Mark::Action, "Open the member list"),
                 (Mark::Action, "Open the DS participants"),
-                (Mark::Pending, "Reading mail…"),
                 (Mark::Off, "Not seen this week"),
+                (Mark::Pending, "Reading mail…"),
             ]
         );
 
         state.mail.error = Some("mail database not found".into());
         let s = screen(&state, now);
         assert_eq!(
-            (s.rows[3].mark, s.rows[3].text.as_str()),
+            (s.rows[4].mark, s.rows[4].text.as_str()),
             (Mark::Failed, "Mail: mail database not found")
         );
 
         // Battles read before the alliance is known can't be told apart yet.
         let started = state.start_mail_load(now);
-        let battle = DsBattle {
+        let battle = Battle {
+            event: Event::DesertStorm,
             time: now - Duration::from_secs(3600),
             won: true,
             alliance_id: "ours".into(),
@@ -684,7 +685,7 @@ mod tests {
         state.finish_mail_load(&started, Ok(vec![battle]), now);
         let s = screen(&state, now);
         assert_eq!(
-            (s.rows[3].mark, s.rows[3].text.as_str()),
+            (s.rows[4].mark, s.rows[4].text.as_str()),
             (Mark::Action, "Open the member list")
         );
     }
@@ -695,7 +696,7 @@ mod tests {
         let mut state = loaded(now);
         let s = screen(&state, now);
         assert_eq!(
-            (s.rows[3].mark, s.rows[3].text.as_str()),
+            (s.rows[4].mark, s.rows[4].text.as_str()),
             (Mark::Done, "In sync")
         );
         // The next read, 5 minutes later, is refused.
@@ -709,7 +710,7 @@ mod tests {
         assert_eq!(state.mail.loaded, Some(now), "the earlier read is kept");
         let s = screen(&state, later);
         assert_eq!(
-            (s.rows[3].mark, s.rows[3].text.as_str()),
+            (s.rows[4].mark, s.rows[4].text.as_str()),
             (
                 Mark::Failed,
                 "Stale · mail: cannot open the mail database: Access is denied. (os error 5)"

@@ -11,9 +11,10 @@
 use std::time::Duration;
 
 use crate::app::state::State;
+use crate::game::battle::Battle;
 use crate::game::panel::{
-    CanyonParticipant, Entry, MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, game_text,
-    players_for_api,
+    CanyonParticipant, Entry, MAX_NAME, MAX_TAG, Member, Panel, Participant, VsScore, count,
+    game_text, players_for_api,
 };
 use crate::game::week::{monday_days, vs_day};
 use crate::util::json::escape;
@@ -23,7 +24,8 @@ use crate::util::time::utc_iso;
 /// 2: one section per panel instead of merged players; the alliance at the top, in place of
 /// the account, which the roster already lists.
 /// 3: Canyon Storm sign-ups, `csSignups`.
-pub const SCHEMA_VERSION: u32 = 3;
+/// 4: Canyon Storm results, `csResults`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The warzones the API takes.
 const WARZONES: std::ops::RangeInclusive<i64> = 1..=99_999;
@@ -49,16 +51,15 @@ pub struct Payload {
 
 /// The payload:
 ///
-/// `{"schemaVersion": 3, "week": "YYYY-MM-DD", "generated", "alliance": {...} | null,
+/// `{"schemaVersion": 4, "week": "YYYY-MM-DD", "generated", "alliance": {...} | null,
 ///   "roster": panel | null, "dsSignups": panel | null, "dsResults": {...} | null,
-///   "csSignups": panel | null, "vs": [panel | null; 6]}`
+///   "csSignups": panel | null, "csResults": {...} | null, "vs": [panel | null; 6]}`
 ///
 /// where a panel is `{"updated", "complete", "players": [...]}`.
 ///
 /// `now` is this PC's time. The weekly reset runs first, on the game server's clock, so data
-/// from a week that has just ended is never labelled with the new week. Desert Storm results
-/// count as loaded only once our alliance is known: before that no battle can be told to be
-/// ours.
+/// from a week that has just ended is never labelled with the new week. Results count as loaded
+/// only once our alliance is known: before that no battle can be told to be ours.
 pub fn payload(state: &mut State, now: Duration) -> Payload {
     state.tick(now);
     let state = &*state;
@@ -73,11 +74,12 @@ pub fn payload(state: &mut State, now: Duration) -> Payload {
         .collect();
     let (alliance_json, alliance) = alliance_json(state, now);
     let content = format!(
-        "\"alliance\":{alliance_json},\"roster\":{},\"dsSignups\":{},\"dsResults\":{},\"csSignups\":{},\"vs\":[{}]",
+        "\"alliance\":{alliance_json},\"roster\":{},\"dsSignups\":{},\"dsResults\":{},\"csSignups\":{},\"csResults\":{},\"vs\":[{}]",
         panel_json(&view.roster, Member::to_json),
         panel_json(&view.ds_signups, Participant::to_json),
-        ds_results_json(state),
+        results_json(state, view.ds_battles()),
         panel_json(&view.cs_signups, CanyonParticipant::to_json),
+        results_json(state, view.cs_battles()),
         vs.join(",")
     );
     let week = escape(&utc_iso(monday)[..10]);
@@ -186,10 +188,10 @@ fn alliance_json(state: &State, now: Duration) -> (String, Vec<Seen>) {
 }
 
 /// `{"updated", "battles": [{"time", "won", "complete", "players": [{"uid", "score"}]}]}`:
-/// each of this week's battles as its result mail gives it. `null` until the mail has been
-/// read and our alliance is known. Battle times are the mails' own, already on the game
-/// server's clock.
-fn ds_results_json(state: &State) -> String {
+/// each of this week's `battles` (Desert Storm's or Canyon Storm's) as its result mail gives
+/// it. `null` until the mail has been read and our alliance is known. Battle times are the
+/// mails' own, already on the game server's clock.
+fn results_json<'a>(state: &State, battles: impl Iterator<Item = &'a Battle>) -> String {
     let Some(loaded) = state
         .mail
         .loaded
@@ -197,14 +199,15 @@ fn ds_results_json(state: &State) -> String {
     else {
         return "null".into();
     };
-    let battles: Vec<String> = state
-        .view
-        .ds_battles()
+    let battles: Vec<String> = battles
         .map(|b| {
             let (kept, readable) = players_for_api(&b.players, |(uid, _)| uid.as_str());
             let players: Vec<String> = kept
                 .into_iter()
-                .map(|(uid, score)| format!("{{\"uid\":{},\"score\":{score}}}", escape(uid)))
+                .map(|(uid, score)| {
+                    let score = count(Some(*score)).map_or("null".into(), |s| s.to_string());
+                    format!("{{\"uid\":{},\"score\":{score}}}", escape(uid))
+                })
                 .collect();
             format!(
                 "{{\"time\":{},\"won\":{},\"complete\":{},\"players\":[{}]}}",
@@ -225,7 +228,7 @@ fn ds_results_json(state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::battle::DsBattle;
+    use crate::game::battle::Event;
     use crate::protocol::message::Message;
     use crate::protocol::sfs::Value;
     use crate::util::json::{self, Json};
@@ -259,13 +262,13 @@ mod tests {
         let mut state = State::default();
         state.mail.loaded = Some(Duration::from_secs(SATURDAY));
         let v = payload(&mut state, SATURDAY);
-        assert_eq!(v.get("schemaVersion"), Some(&Json::Number(3.0)));
+        assert_eq!(v.get("schemaVersion"), Some(&Json::Number(4.0)));
         assert_eq!(v.get("week").and_then(Json::as_str), Some("2026-09-28"));
         assert_eq!(
             v.get("generated").and_then(Json::as_str),
             Some("2026-10-03T10:00:00Z")
         );
-        for key in ["alliance", "roster", "dsSignups", "csSignups"] {
+        for key in ["alliance", "roster", "dsSignups", "csSignups", "csResults"] {
             assert_eq!(v.get(key), Some(&Json::Null), "{key}");
         }
         assert_eq!(
@@ -437,7 +440,8 @@ mod tests {
         let mut state = State::default();
         state.record(&roster(SATURDAY));
         let started = state.start_mail_load(Duration::from_secs(SATURDAY));
-        let battle = DsBattle {
+        let battle = Battle {
+            event: Event::DesertStorm,
             time: Duration::from_secs(SATURDAY - 9 * 3600),
             won: true,
             alliance_id: "ours".into(),
@@ -469,7 +473,8 @@ mod tests {
         let mut state = State::default();
         state.record(&roster(SATURDAY));
         let started = state.start_mail_load(Duration::from_secs(SATURDAY));
-        let battle = DsBattle {
+        let battle = Battle {
+            event: Event::DesertStorm,
             time: Duration::from_secs(SATURDAY - 9 * 3600),
             won: true,
             alliance_id: "ours".into(),
@@ -494,6 +499,46 @@ mod tests {
                 r#"{"time":"2026-10-03T01:00:00Z","won":true,"complete":false,"players":[{"uid":"1","score":50},{"uid":"2","score":0}]}"#
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn cs_results_carry_our_canyon_storm_battles_in_the_ds_shape() {
+        let mut state = State::default();
+        state.record(&roster(SATURDAY));
+        let started = state.start_mail_load(Duration::from_secs(SATURDAY));
+        // Thursday 14:30:47 UTC: our alliance and its ally won together.
+        let canyon = |alliance: &str, players: Vec<(String, i64)>| Battle {
+            event: Event::CanyonStorm,
+            time: Duration::from_secs(SATURDAY - 44 * 3600 + 1847),
+            won: true,
+            alliance_id: alliance.into(),
+            score: 290_000,
+            enemy_abbr: "OPP".into(),
+            enemy_name: "Opponents".into(),
+            enemy_score: 230_000,
+            players,
+            players_complete: true,
+        };
+        let battles = vec![
+            canyon("ours", vec![("1".into(), 50), ("2".into(), -1)]),
+            canyon("ally", vec![("9".into(), 70)]),
+        ];
+        state.finish_mail_load(&started, Ok(battles), Duration::from_secs(SATURDAY));
+        let v = payload(&mut state, SATURDAY);
+        assert_eq!(
+            v.get("csResults").and_then(|r| r.get("battles")),
+            Some(
+                &json::parse(
+                    r#"[{"time":"2026-10-01T14:30:47Z","won":true,"complete":true,"players":[{"uid":"1","score":50},{"uid":"2","score":null}]}]"#
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            v.get("dsResults").and_then(|r| r.get("battles")),
+            Some(&Json::Array(vec![])),
+            "no Desert Storm battle"
         );
     }
 

@@ -250,7 +250,7 @@ pub fn load_mail(state: &Mutex<State>) {
             return Err(format!("mail database not found at {}", path.display()));
         }
         let bytes = mail::read_snapshot(&path)?;
-        mail::ds_battles(&bytes)
+        mail::battles(&bytes)
     };
     let result = panic::catch_unwind(read)
         .unwrap_or_else(|p| Err(format!("internal error: {}", panic_text(p.as_ref()))));

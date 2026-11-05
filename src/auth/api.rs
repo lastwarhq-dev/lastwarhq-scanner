@@ -60,6 +60,7 @@ pub struct SyncReply {
     pub ds_signups: String,
     pub ds_results: String,
     pub cs_signups: String,
+    pub cs_results: String,
     /// Monday to Saturday.
     pub vs: Vec<String>,
     pub next_sync_after: Option<u64>,
@@ -211,6 +212,7 @@ fn parse_sync(data: &Json) -> SyncReply {
         ds_signups: status("dsSignups"),
         ds_results: status("dsResults"),
         cs_signups: status("csSignups"),
+        cs_results: status("csResults"),
         vs,
         next_sync_after: next,
     }
@@ -300,7 +302,7 @@ mod tests {
     fn sync_answers_say_what_happened_to_each_section() {
         let data = reply(
             200,
-            br#"{"sections":{"alliance":"applied","roster":"unchanged","dsSignups":"stale","dsResults":"missing","csSignups":"applied","vs":["applied","unchanged","stale","missing","missing","missing"]},"nextSyncAfter":60}"#,
+            br#"{"sections":{"alliance":"applied","roster":"unchanged","dsSignups":"stale","dsResults":"missing","csSignups":"applied","csResults":"unchanged","vs":["applied","unchanged","stale","missing","missing","missing"]},"nextSyncAfter":60}"#,
             None,
         )
         .unwrap();
@@ -312,6 +314,7 @@ mod tests {
                 ds_signups: "stale".into(),
                 ds_results: "missing".into(),
                 cs_signups: "applied".into(),
+                cs_results: "unchanged".into(),
                 vs: [
                     "applied",
                     "unchanged",

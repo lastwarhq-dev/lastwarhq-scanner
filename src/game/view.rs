@@ -1,13 +1,13 @@
 //! The current view: the newest list from each panel, kept as the panel sent it, and this
-//! week's Desert Storm battles from the mail. Panels are not merged; each entry carries its
-//! player's uid, and whoever receives the data joins panels by it.
+//! week's Desert Storm and Canyon Storm battles from the mail. Panels are not merged; each
+//! entry carries its player's uid, and whoever receives the data joins panels by it.
 //!
 //! The view belongs to one account, one alliance and one VS week. When any of them changes,
 //! [`View::clear`] drops what belonged to the old one:
 //!
 //! | Change | Cleared |
 //! |---|---|
-//! | VS week | VS rankings, Desert Storm sign-ups and battles, Canyon Storm sign-ups |
+//! | VS week | VS rankings, Desert Storm sign-ups and battles, Canyon Storm sign-ups and battles |
 //! | Alliance | the above, the member list, and the week of the Canyon Storm battles |
 //! | Account | everything, including the account itself |
 //!
@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use crate::game::account::{Account, own_uid};
-use crate::game::battle::DsBattle;
+use crate::game::battle::{Battle, Event};
 use crate::game::panel::{CanyonParticipant, Member, Panel, Participant, VsScore};
 use crate::game::week::{ds_signups_open, vs_day};
 use crate::protocol::message::Message;
@@ -40,8 +40,8 @@ pub struct View {
     pub ds_signups: Option<Panel<Participant>>,
     /// Each completed VS day's ranking, Monday (0) to Saturday (5).
     pub vs_days: [Option<Panel<VsScore>>; 6],
-    /// This week's Desert Storm battles, from the last mail load.
-    ds_battles: Vec<DsBattle>,
+    /// This week's Desert Storm and Canyon Storm battles, from the last mail load.
+    battles: Vec<Battle>,
     /// The Canyon Storm participants panel, for the battles in the view's week.
     pub cs_signups: Option<Panel<CanyonParticipant>>,
     /// The VS week of the Canyon Storm battles the game last listed (`quarantine.act.info`).
@@ -184,7 +184,7 @@ impl View {
             };
             return;
         }
-        self.ds_battles.clear();
+        self.battles.clear();
         self.ds_signups = None;
         self.cs_signups = None;
         self.vs_days = Default::default();
@@ -291,7 +291,7 @@ impl View {
         let rolled = match self.vs_week {
             Some(ahead) if ahead > week => {
                 self.vs_week = Some(week);
-                self.ds_battles.clear();
+                self.battles.clear();
                 self.cs_signups = None;
                 true
             }
@@ -316,9 +316,8 @@ impl View {
     }
 
     /// Clears everything that belongs to one VS week once `time` falls in a later week: VS
-    /// rankings, Desert Storm sign-ups and battles, and Canyon Storm sign-ups. The member list
-    /// stays. Also clears the
-    /// sign-ups from Saturday on. Called for every message and, from the window's clock, every
+    /// rankings, and Desert Storm and Canyon Storm sign-ups and battles. The member list stays.
+    /// Also clears the Desert Storm sign-ups from Saturday on. Called for every message and, from the window's clock, every
     /// second, so both happen even while the game is closed. Returns whether anything changed.
     pub fn roll_vs_week(&mut self, time: Duration) -> bool {
         let (week, _) = vs_day(time);
@@ -336,29 +335,40 @@ impl View {
         new_week || closed
     }
 
-    /// Replaces the Desert Storm battles with those from the view's VS week, after running the
-    /// weekly reset for `now`. The view's week can already be later than `now` (the window's
+    /// Replaces the battles with those from the view's VS week, after running the weekly reset
+    /// for `now`. The view's week can already be later than `now` (the window's
     /// clock ran the reset first), and then that later week is the one kept. Returns how many
     /// were kept.
-    pub fn set_ds_battles(&mut self, battles: Vec<DsBattle>, now: Duration) -> usize {
+    pub fn set_battles(&mut self, battles: Vec<Battle>, now: Duration) -> usize {
         self.roll_vs_week(now);
         let week = self.vs_week;
-        self.ds_battles = battles
+        self.battles = battles
             .into_iter()
             .filter(|b| Some(vs_day(b.time).0) == week)
             .collect();
-        self.ds_battles.len()
+        self.battles.len()
     }
 
-    /// This week's battles fought by our alliance. The mail database holds every account's
-    /// mail, so it can hold other alliances' battles too; a battle counts only when it belongs
-    /// to our alliance. Until our alliance is known, none do: a player's past battle for
-    /// another alliance must not pass as ours.
-    pub fn ds_battles(&self) -> impl Iterator<Item = &DsBattle> {
+    /// This week's Desert Storm battles fought by our alliance.
+    pub fn ds_battles(&self) -> impl Iterator<Item = &Battle> {
+        self.our_battles(Event::DesertStorm)
+    }
+
+    /// This week's Canyon Storm battles fought by our alliance.
+    pub fn cs_battles(&self) -> impl Iterator<Item = &Battle> {
+        self.our_battles(Event::CanyonStorm)
+    }
+
+    /// This week's `event` battles fought by our alliance. The mail database holds every
+    /// account's mail, so it can hold other alliances' battles too, and a Canyon Storm mail
+    /// gives a battle for each alliance on our side; a battle counts only when it belongs to
+    /// our alliance. Until our alliance is known, none do: a player's past battle for another
+    /// alliance must not pass as ours.
+    fn our_battles(&self, event: Event) -> impl Iterator<Item = &Battle> {
         let alliance = self.alliance_id();
-        self.ds_battles
+        self.battles
             .iter()
-            .filter(move |b| alliance == Some(b.alliance_id.as_str()))
+            .filter(move |b| b.event == event && alliance == Some(b.alliance_id.as_str()))
     }
 
     /// Battles from the last mail load that can't be attributed yet because our alliance is
@@ -367,7 +377,7 @@ impl View {
         if self.alliance_id().is_some() {
             0
         } else {
-            self.ds_battles.len()
+            self.battles.len()
         }
     }
 
@@ -577,8 +587,9 @@ mod tests {
         ])
     }
 
-    fn battle(time: u64, won: bool, players: &[(&str, i64)]) -> DsBattle {
-        DsBattle {
+    fn battle(time: u64, won: bool, players: &[(&str, i64)]) -> Battle {
+        Battle {
+            event: Event::DesertStorm,
             time: Duration::from_secs(time),
             won,
             alliance_id: "ours".into(),
@@ -816,10 +827,7 @@ mod tests {
             FRIDAY,
         ));
         let battles = || vec![battle(FRIDAY - 9 * 3600, true, &[("1", 50)])];
-        assert_eq!(
-            view.set_ds_battles(battles(), Duration::from_secs(FRIDAY)),
-            1
-        );
+        assert_eq!(view.set_battles(battles(), Duration::from_secs(FRIDAY)), 1);
 
         // Monday 02:00 UTC passes on the window's clock, with no game messages.
         view.roll_vs_week(Duration::from_secs(MONDAY - 1));
@@ -832,7 +840,7 @@ mod tests {
 
         // Loading mail in the new week finds only last week's battles: nothing is kept.
         assert_eq!(
-            view.set_ds_battles(battles(), Duration::from_secs(MONDAY + 60)),
+            view.set_battles(battles(), Duration::from_secs(MONDAY + 60)),
             0
         );
     }
@@ -855,7 +863,7 @@ mod tests {
         let mut view = view_with_ann();
         let mut theirs = battle(FRIDAY, true, &[("x", 5)]);
         theirs.alliance_id = "theirs".into();
-        let kept = view.set_ds_battles(
+        let kept = view.set_battles(
             vec![
                 battle(FRIDAY - 9 * 3600, true, &[("1", 50)]),
                 battle(FRIDAY, false, &[("2", 30)]),
@@ -876,7 +884,7 @@ mod tests {
         let mut other = battle(FRIDAY, true, &[("1", 50)]);
         other.alliance_id = "other alliance".into();
         let ours = battle(FRIDAY, false, &[("1", 30)]);
-        view.set_ds_battles(vec![other, ours], Duration::from_secs(FRIDAY));
+        view.set_battles(vec![other, ours], Duration::from_secs(FRIDAY));
         assert_eq!(view.ds_battles().count(), 0, "alliance unknown: none count");
         assert_eq!(view.unattributed_battles(), 2);
 
@@ -958,7 +966,7 @@ mod tests {
             ranking(4, &[("1", 300, "ours")]),
             FRIDAY,
         ));
-        view.set_ds_battles(
+        view.set_battles(
             vec![battle(FRIDAY, true, &[("1", 5)])],
             Duration::from_secs(FRIDAY),
         );
@@ -1049,7 +1057,7 @@ mod tests {
     #[test]
     fn a_new_roster_alliance_replaces_the_old_one_while_the_account_is_unknown() {
         let mut view = view_with_ann();
-        view.set_ds_battles(
+        view.set_battles(
             vec![battle(FRIDAY, true, &[("1", 5)])],
             Duration::from_secs(FRIDAY),
         );
@@ -1080,7 +1088,7 @@ mod tests {
             participants(vec![participant_entry("1", 1)]),
             FRIDAY,
         ));
-        view.set_ds_battles(
+        view.set_battles(
             vec![battle(FRIDAY, true, &[("1", 5)])],
             Duration::from_secs(FRIDAY),
         );
@@ -1248,6 +1256,27 @@ mod tests {
         );
         assert!(view.roll_vs_week(Duration::from_secs(MONDAY + 7 * DAY)));
         assert_eq!(view.cs_signups, None);
+    }
+
+    #[test]
+    fn canyon_storm_battles_are_kept_apart_and_only_ours() {
+        let mut view = view_with_ann();
+        let thursday = FRIDAY - 6 * 3600;
+        let canyon = |alliance: &str| Battle {
+            event: Event::CanyonStorm,
+            alliance_id: alliance.into(),
+            ..battle(thursday, true, &[("1", 50)])
+        };
+        let desert = battle(FRIDAY, false, &[("1", 9)]);
+        // The mail's other alliance on our side comes as a battle of its own.
+        view.set_battles(
+            vec![canyon("ours"), canyon("ally"), desert],
+            Duration::from_secs(FRIDAY),
+        );
+        let cs: Vec<_> = view.cs_battles().map(|b| b.alliance_id.as_str()).collect();
+        assert_eq!(cs, ["ours"]);
+        let ds: Vec<bool> = view.ds_battles().map(|b| b.won).collect();
+        assert_eq!(ds, [false]);
     }
 
     #[test]
